@@ -1,0 +1,3 @@
+[test]
+# Removes the throwaway Postgres container of a test run when the run ends.
+preload = ["./src/server/test/setup.ts"]

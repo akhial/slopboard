@@ -1,0 +1,70 @@
+# Slopboard and its Postgres.
+#
+#   cp .env.example deploy/.env      # then fill it in
+#   docker compose -f deploy/compose.yaml up -d --build
+#
+# Every setting and secret comes from deploy/.env (see ../.env.example), which
+# compose reads twice: as the containers' environment, and for the ${...}
+# values in this file.
+
+name: slopboard
+
+services:
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    # Takes POSTGRES_PASSWORD from the env file; user and database are fixed.
+    # "required: false" only lets `docker compose config` run on a fresh
+    # checkout: without the file Postgres refuses to start, and says why.
+    env_file:
+      - path: ./.env
+        required: false
+    environment:
+      POSTGRES_USER: slopboard
+      POSTGRES_DB: slopboard
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U slopboard -d slopboard"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    networks:
+      - internal
+
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: slopboard:local
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - path: ./.env
+        required: false
+    environment:
+      # Fixed inside the container so it always matches the published port below.
+      HOST: 0.0.0.0
+      PORT: "8318"
+      NODE_ENV: production
+    ports:
+      # Loopback only unless PUBLISH says otherwise. Put `tailscale serve` (or
+      # similar) in front for the tailnet.
+      - "${PUBLISH:-127.0.0.1:8318}:8318"
+    networks:
+      - internal
+      - proxy
+
+networks:
+  internal:
+  # The Docker network the proxy's own compose project created, so that
+  # PROXY_URL can name the proxy's container.
+  proxy:
+    name: ${PROXY_NETWORK:-cliproxyapi_default}
+    external: true
+
+volumes:
+  db-data:

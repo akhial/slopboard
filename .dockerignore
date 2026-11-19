@@ -1,0 +1,11 @@
+.git
+.tmp
+node_modules
+dist
+deploy
+.env
+.env.*
+!.env.example
+*.log
+README.md
+src/server/test
