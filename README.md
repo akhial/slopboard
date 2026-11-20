@@ -1,5 +1,7 @@
 # Slopboard
 
+![Slopboard: the leader's card, the week's total and the team's numbers](docs/slopboard.png)
+
 Who burned the most tokens, on which model, in which thread, with how many
 subagents, at what hour. A leaderboard for a handful of people sharing AI
 coding subscriptions through one [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
