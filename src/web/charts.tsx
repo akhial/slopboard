@@ -5,6 +5,7 @@ import type { KeyboardEvent } from "react";
 import type { Board, HeatCell } from "../shared/api.ts";
 import { colourOf } from "./colors.ts";
 import { clockFor, compact, full, hourLabel, WEEKDAYS } from "./format.ts";
+import { Cutout } from "./art.tsx";
 import { castOf, personStyle, SectionHead, useSize } from "./ui.tsx";
 
 /** Smallest "round" number at or above the value, so the axis ends on a readable label. */
@@ -87,7 +88,8 @@ export function Timeline({ board }: { board: Board }) {
   const tipSide = tipX > width / 2 ? "left" : "right";
 
   return (
-    <section className="timeline panel" aria-labelledby="timeline-title">
+    <section className="timeline panel has-art" aria-labelledby="timeline-title">
+      <Cutout name="hand-coin" className="panel-art" />
       <SectionHead id="timeline-title" title="Damage over" mark="time" note={`Tokens per ${unit}, stacked by suspect. ${unit === "hour" ? "The current hour is still unfolding." : "Today is still unfolding."}`} />
       <div className="legend" role="group" aria-label="Show or hide people">
         {ids.map((id) => (
@@ -183,24 +185,16 @@ export function Timeline({ board }: { board: Board }) {
   );
 }
 
-// Pale straw through orange to a deep burnt plum: readable as "more" without borrowing anyone's colour.
-const HEAT_STOPS: readonly (readonly [number, number, number])[] = [
-  [253, 243, 208],
-  [255, 215, 106],
-  [255, 150, 56],
-  [228, 54, 42],
-  [110, 18, 40],
-];
+// Five stops, --heat-0 (calm) to --heat-4 (feral), set per theme in styles.css: they run from
+// the page colour towards the strongest ink, so "more" reads the same in light and dark mode.
+const HEAT_STOPS = 5;
 
 function heatColour(level: number): string {
   const clamped = Math.max(0, Math.min(1, level));
-  const pos = clamped * (HEAT_STOPS.length - 1);
-  const i = Math.min(HEAT_STOPS.length - 2, Math.floor(pos));
-  const a = HEAT_STOPS[i] ?? [0, 0, 0];
-  const b = HEAT_STOPS[i + 1] ?? a;
-  const k = pos - i;
-  const mix = (j: 0 | 1 | 2) => Math.round(a[j] + (b[j] - a[j]) * k);
-  return `rgb(${mix(0)} ${mix(1)} ${mix(2)})`;
+  const pos = clamped * (HEAT_STOPS - 1);
+  const i = Math.min(HEAT_STOPS - 2, Math.floor(pos));
+  const k = Math.round((pos - i) * 100);
+  return `color-mix(in oklab, var(--heat-${i + 1}) ${k}%, var(--heat-${i}))`;
 }
 
 export function Heatmap({ board }: { board: Board }) {
@@ -227,7 +221,8 @@ export function Heatmap({ board }: { board: Board }) {
   const shown = picked ?? peakKey;
   const hoursRow = Array.from({ length: 24 }, (_, h) => h);
   return (
-    <section className="heat panel" aria-labelledby="heat-title">
+    <section className="heat panel has-art" aria-labelledby="heat-title">
+      <Cutout name="alarm-clock" className="panel-art" />
       <SectionHead id="heat-title" title="Hours of" mark="weakness" note={`Tokens by weekday and hour over the last 28 days, regardless of range. ${board.timezone} time.`} />
       <div className="heat-grid" role="img" aria-label={peakKey !== null ? `Heatmap of tokens by weekday and hour. Busiest slot, ${describe(peakKey)}.` : "Heatmap of tokens by weekday and hour. No traffic in the last 28 days."} onPointerLeave={() => setPicked(null)}>
         <span className="heat-band band-night" aria-hidden="true">

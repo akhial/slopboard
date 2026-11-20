@@ -1,28 +1,24 @@
 // One colour per person, the same in every chart.
 //
-// The colour is derived from the person's id: a hash picks a slot in a palette of colours that
-// stay distinct next to each other and keep dark text readable. The palette leaves out the
-// page's own signal colours (slop lime for the brand, red for output tokens and trouble), so a
-// colour on the page always means a person. With a handful of people two ids
-// often hash to the same slot, so a clash moves the later id (alphabetically) to the next free
-// slot, and the outcome is remembered in localStorage so nobody changes colour when the set of
-// people differs between ranges.
+// The colour is derived from the person's id: a hash picks a slot in a palette of flat, loud
+// accents (the board's lime and purple plus pink, orange, blue, teal and yellow) that stay
+// distinct next to each other and keep dark text readable, in light and dark mode alike. With a
+// handful of people two ids often hash to the same slot, so a clash moves the later id
+// (alphabetically) to the next free slot, and the outcome is remembered in localStorage so
+// nobody changes colour when the set of people differs between ranges.
 
 const PALETTE = [
-  "#ff6fa5", // bubblegum
-  "#35d6a0", // mint
-  "#ffb000", // amber
-  "#45c4f5", // sky
-  "#b592ff", // lilac
-  "#ff8552", // coral
-  "#6090ff", // cornflower
-  "#d2a878", // tan
-  "#e36ad8", // orchid
-  "#f2e24b", // lemon
+  "#d8ff54", // lime
+  "#c575f8", // purple
+  "#ff5db1", // pink
+  "#ff9f43", // orange
+  "#7cc4ff", // blue
+  "#3ee0b5", // teal
+  "#ffe45c", // yellow
 ] as const;
 
 /** The unassigned "shared" bucket is never a palette colour. */
-export const GHOST = "#bdb5a3";
+export const GHOST = "#9a9a9a";
 
 const STORE_KEY = "slopboard.colours.v1";
 
@@ -89,7 +85,7 @@ export function registerPeople(people: readonly { id: string; unassigned: boolea
 /** Colours past the palette: hues a golden angle apart, kept light enough for dark text. */
 function generated(n: number): string {
   const hue = Math.round((n * 137.508 + 20) % 360);
-  return `hsl(${hue} ${n % 2 ? 62 : 82}% ${n % 3 ? 70 : 80}%)`;
+  return `hsl(${hue} ${n % 2 ? 85 : 95}% ${n % 3 ? 66 : 72}%)`;
 }
 
 /** Ids that are not a registered person (the shared key, anything unknown) stay grey. */

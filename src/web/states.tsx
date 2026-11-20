@@ -3,27 +3,15 @@
 import type { MouseEvent } from "react";
 import type { Board, RangeKey } from "../shared/api.ts";
 import { hrefFor, navigate, rangeInfo, RANGES } from "./data.ts";
-import { Snout } from "./ui.tsx";
-
-function Trough({ tipped = false }: { tipped?: boolean }) {
-  return (
-    <svg className={`trough ${tipped ? "is-tipped" : ""}`} viewBox="0 0 240 150" aria-hidden="true">
-      <g className="trough-body">
-        <path className="trough-shell" d="M22 62 H218 L196 126 H44 Z" />
-        <path className="trough-rim" d="M12 50 H228 V66 H12 Z" />
-        <path className="trough-leg" d="M58 126 V142 M182 126 V142" />
-        <path className="trough-shine" d="M52 82 H112 M52 96 H88" />
-      </g>
-      {tipped ? <path className="trough-spill" d="M150 132 C176 120 204 126 226 140 C200 148 172 148 150 132 Z" /> : null}
-    </svg>
-  );
-}
+import { Cutout, Doodle } from "./art.tsx";
 
 export function Loading() {
   return (
     <main className="state state-loading" aria-busy="true">
-      <Snout className="snout-big is-sniffing" />
-      <h2>Auditing the slop…</h2>
+      <Cutout name="pig" className="state-art is-sniffing" />
+      <h2>
+        Auditing the <em className="scrawl">slop…</em>
+      </h2>
       <p>Pulling everyone's receipts.</p>
     </main>
   );
@@ -32,8 +20,13 @@ export function Loading() {
 export function Down({ error, onRetry, loading }: { error: string; onRetry: () => void; loading: boolean }) {
   return (
     <main className="state state-down">
-      <Trough tipped />
-      <h2>The board has flatlined</h2>
+      <div className="state-art-wrap" aria-hidden="true">
+        <Cutout name="telephone" className="state-art" />
+        <Doodle name="ticks" className="state-ticks" />
+      </div>
+      <h2>
+        The board has <em className="scrawl">flatlined</em>
+      </h2>
       <p>Can't reach the server right now. It will retry on its own every few seconds, or you can mash the button like it's a 429.</p>
       <pre className="state-error" role="alert">
         {error}
@@ -50,8 +43,13 @@ export function DayOne({ board }: { board: Board }) {
   const keys = board.people.filter((p) => !p.unassigned).length;
   return (
     <section className="state state-empty" aria-labelledby="empty-title">
-      <Trough />
-      <h2 id="empty-title">Clean slate. Suspiciously clean.</h2>
+      <div className="state-art-wrap" aria-hidden="true">
+        <Cutout name="melting-smiley" className="state-art" />
+        <Doodle name="ticks" className="state-ticks" />
+      </div>
+      <h2 id="empty-title">
+        Clean slate. <em className="scrawl">Suspiciously clean.</em>
+      </h2>
       <p>
         Not a single request has crossed the proxy yet, so nobody has anything to answer for.{" "}
         {keys > 0 ? `${keys} ${keys === 1 ? "person has a key and hasn't touched it" : "people have keys and haven't touched them"}. ` : null}
@@ -87,8 +85,13 @@ export function QuietRange({ range }: { range: RangeKey }) {
   const wider = RANGES.filter((r) => RANGES.findIndex((x) => x.key === r.key) > RANGES.findIndex((x) => x.key === range));
   return (
     <section className="state state-quiet" aria-labelledby="quiet-title">
-      <Snout className="snout-big" />
-      <h2 id="quiet-title">Zero activity {info.phrase}</h2>
+      <div className="state-art-wrap" aria-hidden="true">
+        <Cutout name="alarm-clock" className="state-art" />
+        <Doodle name="ticks" className="state-ticks" />
+      </div>
+      <h2 id="quiet-title">
+        Zero activity <em className="scrawl">{info.phrase}</em>
+      </h2>
       <p>Not a single request in this window, so the podium stays empty. Either everyone is writing code by hand or the Wi-Fi died.</p>
       {wider.length > 0 ? (
         <p className="state-links">
