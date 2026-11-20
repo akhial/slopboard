@@ -4,9 +4,9 @@ import type { Board } from "../shared/api.ts";
 import { Awards, Records } from "./cabinet.tsx";
 import { Heatmap, Timeline } from "./charts.tsx";
 import { rangeInfo, useBoard, useUrlState } from "./data.ts";
-import { HeroMain, Tiles } from "./hero.tsx";
+import { Guilt, HeroMain, Tiles } from "./hero.tsx";
 import { Feed, Models } from "./lists.tsx";
-import { Alerts, DemoBar, Footer, Masthead, Ticker } from "./masthead.tsx";
+import { Alerts, DemoBar, Footer, Masthead, PretendBill, Ticker } from "./masthead.tsx";
 import { Bench, Podium, Standings } from "./ranking.tsx";
 import { DayOne, Down, Loading, QuietRange } from "./states.tsx";
 import { contenders } from "./ui.tsx";
@@ -50,16 +50,17 @@ function BoardView({ board, switching }: { board: Board; switching: boolean }) {
         </>
       ) : (
         <>
-          {/* One grid, three blocks: the layout decides where the podium sits (see .top in styles.css). */}
+          {/* One grid, three blocks: the cards and the total on one side, the black slab of team
+              numbers on the other (see .top in styles.css). */}
           <div className={quiet ? "top" : "top has-podium"}>
-            <Guard>
-              <HeroMain board={board} />
-            </Guard>
             {quiet ? null : (
               <Guard>
                 <Podium board={board} />
               </Guard>
             )}
+            <Guard>
+              <HeroMain board={board} />
+            </Guard>
             <Guard>
               <Tiles board={board} />
             </Guard>
@@ -82,9 +83,17 @@ function BoardView({ board, switching }: { board: Board; switching: boolean }) {
           <Guard>
             <Records board={board} />
           </Guard>
-          <div className="duo duo-wide-left">
+          <div className="duo">
             <Guard>
               <Timeline board={board} />
+            </Guard>
+            <Guard>
+              <Guilt board={board} />
+            </Guard>
+          </div>
+          <div className="duo">
+            <Guard>
+              <Models board={board} />
             </Guard>
             <Guard>
               <Feed board={board} />
@@ -94,9 +103,7 @@ function BoardView({ board, switching }: { board: Board; switching: boolean }) {
             <Guard>
               <Heatmap board={board} />
             </Guard>
-            <Guard>
-              <Models board={board} />
-            </Guard>
+            <PretendBill />
           </div>
         </>
       )}

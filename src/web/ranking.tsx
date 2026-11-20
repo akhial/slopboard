@@ -6,17 +6,17 @@ import type { Board, PersonRow } from "../shared/api.ts";
 import { dealOut } from "./colors.ts";
 import { rangeInfo } from "./data.ts";
 import { clockFor, compact, full, hourLabel, pct, usd } from "./format.ts";
+import { Cutout, Doodle, StickyNote } from "./art.tsx";
 import { Avatar, contenders, Move, movementOf, Num, personStyle, SectionHead, Spark, SplitBar, TOKEN_KINDS } from "./ui.tsx";
 
-const PODIUM_TITLES = ["Lead Defendant", "Willing Accomplice", "Accessory to Slop"];
+const PODIUM_TITLES = ["Lead defendant", "Willing accomplice", "Accessory to slop"];
 
-function Crown() {
+/** The chip on a bank card, drawn. */
+function Chip() {
   return (
-    <svg className="crown" viewBox="0 0 64 40" aria-hidden="true">
-      <path d="M4 36 L2 10 L18 22 L32 3 L46 22 L62 10 L60 36 Z" />
-      <circle cx="2" cy="9" r="3" />
-      <circle cx="32" cy="3" r="3" />
-      <circle cx="62" cy="9" r="3" />
+    <svg className="card-chip" viewBox="0 0 48 38" aria-hidden="true">
+      <rect x="1.5" y="1.5" width="45" height="35" rx="7" />
+      <path d="M1.5 13h13M1.5 25h13M33.5 13h13M33.5 25h13M14.5 1.5v35M33.5 1.5v35M14.5 19h19" />
     </svg>
   );
 }
@@ -33,43 +33,53 @@ function Cost({ person }: { person: PersonRow }) {
   return <Num value={person.costUsd ?? 0} format={usd} />;
 }
 
-function Step({ person, place, board }: { person: PersonRow; place: number; board: Board }) {
+/** The leader, as a loud bank card on a scrap of torn paper. */
+function LeaderCard({ person, board }: { person: PersonRow; board: Board }) {
   const info = rangeInfo(board.range);
   return (
-    <li className={`step step-${place}`} style={personStyle(person.id)}>
-      <article className="step-card" aria-label={`Place ${place}: ${person.name}`}>
-        {place === 1 ? <Crown /> : null}
-        <Avatar id={person.id} name={person.name} className="avatar-xl" />
-        <h3>{person.name}</h3>
-        <p className="step-title">{PODIUM_TITLES[place - 1]}</p>
-        <p className="step-tokens">
-          <Num value={person.tokens.total} />
-          <span>tokens</span>
-        </p>
-        <Spark values={person.spark} id={person.id} className="step-spark" />
-        <dl className="step-stats">
-          <div>
-            <dt>Fake $</dt>
-            <dd>
-              <Cost person={person} />
-            </dd>
-          </div>
-          <div>
-            <dt>Interns</dt>
-            <dd title={`${full(person.subagents)} subagents`}>{compact(person.subagents)}</dd>
-          </div>
-          <div>
-            <dt>Streak</dt>
-            <dd>{person.streakDays}d</dd>
-          </div>
-        </dl>
-      </article>
-      <div className="plinth">
-        <span className="plinth-rank" aria-hidden="true">
-          {place}
+    <article className="leader-card" aria-label={`Place 1: ${person.name}`}>
+      <StickyNote className="leader-note">
+        {PODIUM_TITLES[0]}
+        <Doodle name="crown" />
+      </StickyNote>
+      <Cutout name="melting-smiley" className="leader-smiley" />
+      <Doodle name="ticks" className="leader-ticks" />
+      <Chip />
+      <h3 className="leader-name">{person.name}</h3>
+      <p className="leader-meta">
+        <span>
+          <Num value={person.tokens.total} /> tokens
         </span>
+        <span>
+          <Cost person={person} /> fake bill · {compact(person.subagents)} interns · {person.streakDays}d streak
+        </span>
+      </p>
+      <p className="leader-rank">
+        <span aria-hidden="true">#1</span>
         <Move movement={movementOf(person, board.range)} previous={info.previous} />
+      </p>
+    </article>
+  );
+}
+
+function RunnerCard({ person, place, board }: { person: PersonRow; place: number; board: Board }) {
+  const info = rangeInfo(board.range);
+  return (
+    <li className={`runner wonk ${place === 2 ? "fill-purple" : "fill-white"}`} style={personStyle(person.id)} aria-label={`Place ${place}: ${person.name}`}>
+      <span className="runner-rank" aria-hidden="true">
+        {place}
+      </span>
+      <div className="runner-who">
+        <h3>{person.name}</h3>
+        <p>{PODIUM_TITLES[place - 1]}</p>
       </div>
+      <p className="runner-tokens">
+        <b>
+          <Num value={person.tokens.total} />
+        </b>
+        <span>tokens</span>
+      </p>
+      <Move movement={movementOf(person, board.range)} previous={info.previous} />
     </li>
   );
 }
@@ -77,37 +87,46 @@ function Step({ person, place, board }: { person: PersonRow; place: number; boar
 const VACANT_LINES = ["Alibi holds (for now)", "Open for indictment", "Low bar, still empty"];
 
 export function Podium({ board }: { board: Board }) {
-  // Only people with tokens in this range get a step. A key and a zero do not make a champion.
+  // Only people with tokens in this range get a place. A key and a zero do not make a champion.
   const top = contenders(board).slice(0, 3);
-  const vacant = [1, 2, 3].slice(top.length);
+  const [first, ...rest] = top;
   const info = rangeInfo(board.range);
-  const note =
-    top.length > 0
-      ? `Most tokens ${info.phrase}. Ranked strictly by volume, never by whether it compiled.`
-      : `Nobody with a name has burned a token ${info.phrase}. The unattributed shared key is carrying the whole operation and gets zero credit.`;
   return (
     <section className="podium" aria-labelledby="podium-title">
-      <SectionHead id="podium-title" title="The" mark="podium" note={note} />
-      <ol className="steps">
-        {top.map((p, i) => (
-          <Step key={p.id} person={p} place={i + 1} board={board} />
-        ))}
-        {vacant.map((place) => (
-          <li key={place} className={`step step-${place} is-vacant`}>
-            <div className="step-card">
-              <span className="avatar avatar-xl is-ghost" aria-hidden="true">
-                ?
-              </span>
-              <h3>Vacant</h3>
-              <p className="step-title">{VACANT_LINES[place - 1]}</p>
-            </div>
-            <div className="plinth">
-              <span className="plinth-rank" aria-hidden="true">
+      <h2 className="sr-only" id="podium-title">
+        The podium: most tokens {info.phrase}
+      </h2>
+      <div className="leader">
+        {first ? (
+          <LeaderCard person={first} board={board} />
+        ) : (
+          <article className="leader-card is-vacant">
+            <StickyNote className="leader-note">{VACANT_LINES[0]}</StickyNote>
+            <Chip />
+            <h3 className="leader-name">Vacant</h3>
+            <p className="leader-meta">
+              <span>Nobody with a name has burned a token {info.phrase}.</span>
+            </p>
+          </article>
+        )}
+      </div>
+      <ol className="runners" start={2}>
+        {[2, 3].map((place) => {
+          const person = rest[place - 2];
+          return person ? (
+            <RunnerCard key={person.id} person={person} place={place} board={board} />
+          ) : (
+            <li key={place} className="runner is-vacant">
+              <span className="runner-rank" aria-hidden="true">
                 {place}
               </span>
-            </div>
-          </li>
-        ))}
+              <div className="runner-who">
+                <h3>Vacant</h3>
+                <p>{VACANT_LINES[place - 1]}</p>
+              </div>
+            </li>
+          );
+        })}
       </ol>
     </section>
   );
@@ -123,7 +142,7 @@ function Row({ person, place, board }: { person: PersonRow; place: number | null
   const seen = person.lastSeenAt ? `seen ${seenToday ? clock.time(person.lastSeenAt) : clock.dayTime(person.lastSeenAt)}` : null;
   const habits = [person.peakHour !== null ? `peaks ${hourLabel(person.peakHour)}` : null, seen].filter(Boolean).join(" · ");
   return (
-    <li className={`row ${ghost ? "is-ghost" : ""} ${place !== null && place <= 3 ? "is-top" : ""}`} style={personStyle(person.id)}>
+    <li className={`row ${ghost ? "is-ghost" : ""} ${place !== null && place <= 3 ? `is-top place-${place}` : ""}`} style={personStyle(person.id)}>
       <div className="c-rank">
         <span className="rank-num">
           <span className="sr-only">{place === null ? "Not ranked" : "Place "}</span>

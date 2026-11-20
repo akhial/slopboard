@@ -15,9 +15,11 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "@fontsource-variable/bricolage-grotesque": "^5.3.0",
-    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@fontsource-variable/archivo": "^5.3.0",
+    "@fontsource-variable/inter-tight": "^5.3.0",
+    "@fontsource/caveat-brush": "^5.3.0",
     "@fontsource/noto-color-emoji": "^5.3.2",
+    "@fontsource/permanent-marker": "^5.3.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   }

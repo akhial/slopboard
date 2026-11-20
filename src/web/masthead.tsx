@@ -1,4 +1,4 @@
-// Everything around the board: demo bar, masthead with range switcher and status, ticker,
+// Everything around the board: demo bar, masthead with range switcher and theme toggle, ticker,
 // warnings, footer.
 
 import type { MouseEvent } from "react";
@@ -7,7 +7,11 @@ import { hrefFor, navigate, RANGES, REFRESH_MS, useNow } from "./data.ts";
 import type { BoardState, UrlState } from "./data.ts";
 import { ago, clockFor, duration } from "./format.ts";
 import { SCENARIOS } from "./mock.ts";
-import { castOf, Snout } from "./ui.tsx";
+import { useTheme } from "./theme.ts";
+import type { ThemeChoice } from "./theme.ts";
+import { Cutout, Doodle, Icon } from "./art.tsx";
+import type { IconName } from "./art.tsx";
+import { castOf } from "./ui.tsx";
 
 function go(event: MouseEvent<HTMLAnchorElement>) {
   if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
@@ -72,33 +76,18 @@ export function healthOf(state: BoardState, now: number): Health {
   return { level: "live", label: "Live", warning: null, lag };
 }
 
-function StatusPill({ state }: { state: BoardState }) {
-  const now = useNow(1000);
-  const health = healthOf(state, now);
-  const { fetchedAt, nextAt, loading, board } = state;
-  const sub =
-    fetchedAt === null
-      ? state.error
-        ? "retrying"
-        : "fetching"
-      : health.level === "offline"
-        ? `cached ${ago(now - fetchedAt)}`
-        : health.level === "never"
-          ? "awaiting collector"
-          : (health.level === "stale" || health.level === "lagging") && health.lag !== null
-            ? `${duration(health.lag)} behind`
-            : `checked ${ago(now - fetchedAt)}`;
-  const facts = [
-    health.lag !== null ? `Collector synced ${duration(health.lag)} ago` : board ? "Collector has never synced" : null,
-    board?.lastEventAt ? `Last request at ${clockFor(board.timezone).timeSec(board.lastEventAt)}` : null,
-    "Auto-refreshes every 30s",
-  ].filter(Boolean);
+const THEME_LABELS: Record<ThemeChoice, { icon: IconName; text: string; hint: string }> = {
+  system: { icon: "auto", text: "Auto", hint: "Following the system setting. Click for light." },
+  light: { icon: "sun", text: "Light", hint: "Light mode. Click for dark." },
+  dark: { icon: "moon", text: "Dark", hint: "Dark mode. Click to follow the system setting." },
+};
+
+function ThemeToggle() {
+  const [choice, next] = useTheme();
+  const label = THEME_LABELS[choice];
   return (
-    <button type="button" className={`status status-${health.level}`} onClick={state.refresh} title={`${facts.join(" · ")}. Click to force a refresh.`} aria-label={`Status: ${health.label}, ${sub}. Refresh now`}>
-      <i className="status-dot" aria-hidden="true" />
-      <span className="status-label">{health.label}</span>
-      <span className="status-sub">{sub}</span>
-      {nextAt !== null && !loading ? <i key={nextAt} className="status-timer" style={{ animationDuration: `${Math.max(1, nextAt - Date.now())}ms` }} aria-hidden="true" /> : null}
+    <button type="button" className="round-btn" onClick={next} title={label.hint} aria-label={`Theme: ${label.text}. ${label.hint}`}>
+      <Icon name={label.icon} />
     </button>
   );
 }
@@ -131,21 +120,20 @@ const TAGLINES: ((board: Board | null) => string)[] = [
   () => "Not a productivity metric. A cry for help.",
 ];
 
+/** Today's tagline. One a day, so the board does not change its mind on every refresh. */
+export function taglineFor(board: Board | null): string {
+  return TAGLINES[Math.floor(Date.now() / 86_400_000) % TAGLINES.length]?.(board) ?? "";
+}
+
 export function Masthead({ url, state }: { url: UrlState; state: BoardState }) {
   const board = state.board;
-  const tagline = TAGLINES[Math.floor(Date.now() / 86_400_000) % TAGLINES.length]?.(board);
   return (
     <header className="masthead">
-      <div className="brand">
-        <h1 className="wordmark" aria-label="Slopboard">
-          <span aria-hidden="true">
-            SL
-            <Snout />
-            PBOARD
-          </span>
-        </h1>
-        <p className="tagline">{tagline}</p>
-      </div>
+      <h1 className="wordmark" aria-label="Slopboard">
+        <span aria-hidden="true">
+          SL<span className="wordmark-o emoji">🫠</span>PBOARD
+        </span>
+      </h1>
       <div className="controls">
         <nav className="ranges" aria-label="Time range">
           {RANGES.map((r) => (
@@ -154,7 +142,7 @@ export function Masthead({ url, state }: { url: UrlState; state: BoardState }) {
             </a>
           ))}
         </nav>
-        <StatusPill state={state} />
+        <ThemeToggle />
       </div>
     </header>
   );
@@ -167,7 +155,7 @@ export function Alerts({ state }: { state: BoardState }) {
   return (
     <div className={`alert alert-${health.level}`} role="status">
       <span className="alert-tag" aria-hidden="true">
-        {health.level === "offline" ? "Offline" : health.level === "lagging" ? "Lagging" : health.level === "never" ? "No sync" : "Stale"}
+        {health.label}
       </span>
       <p>
         {health.warning}
@@ -229,14 +217,38 @@ export function Ticker({ board, down = false }: { board: Board | null; down?: bo
   );
 }
 
+/** The pretend bill, explained, as a bank-style promo nobody should click. */
+export function PretendBill() {
+  return (
+    <aside className="promo" aria-labelledby="promo-title">
+      <div className="promo-text">
+        <h2 id="promo-title">
+          Earn
+          <br />
+          nothing
+        </h2>
+        <p>
+          Get up to 0% APY on every token. "Fake invoice" is what all this would cost at public API list rates. Nobody pays it: we're on flat subscriptions, so the only ones losing money are the labs. "Unpriced" means we don't know a model's list rate yet, not that it's free.
+        </p>
+      </div>
+      <div className="promo-art" aria-hidden="true">
+        <Doodle name="crown" className="promo-crown" />
+        <Doodle name="ticks" className="promo-ticks" />
+        <Cutout name="cat-sunglasses" />
+      </div>
+    </aside>
+  );
+}
+
 export function Footer({ board, mock }: { board: Board | null; mock: boolean }) {
   const clock = board ? clockFor(board.timezone) : null;
   return (
     <footer className="footer">
-      <p>
-        <b>About the pretend bill.</b> "Fake invoice" is what these tokens would cost at public API list rates. Nobody here is paying it — we're on flat subscriptions, so the only ones losing money are the labs. "Unpriced" means we don't know a model's list rate yet, not that it's free.
+      <p className="footer-sign">
+        Built to settle arguments nobody should be proud of winning
+        <Doodle name="arrow" />
       </p>
-      <p>
+      <p className="footer-small">
         {board && clock ? (
           <>
             All timestamps in {board.timezone} ({clock.offsetName}). Printed {clock.stamp(board.generatedAt)}. Re-checked every {REFRESH_MS / 1000}s.
@@ -246,7 +258,6 @@ export function Footer({ board, mock }: { board: Board | null; mock: boolean }) 
         )}
         {mock ? " Demo data — drop ?mock=1 from the URL for the actual culprits." : null}
       </p>
-      <p className="footer-sign">Slopboard. Built to settle arguments nobody should be proud of winning.</p>
     </footer>
   );
 }

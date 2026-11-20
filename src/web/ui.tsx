@@ -203,11 +203,12 @@ export function Move({ movement, previous }: { movement: Movement; previous: str
   );
 }
 
+/** A section title: plain words, then one scribbled in brush script. */
 export function SectionHead({ id, title, mark, note, children }: { id: string; title: string; mark: string; note?: ReactNode; children?: ReactNode }) {
   return (
     <header className="section-head">
       <h2 id={id}>
-        {title} <mark>{mark}</mark>
+        {title} <em className="scrawl">{mark}</em>
       </h2>
       {note ? <p className="section-note">{note}</p> : null}
       {children}
@@ -232,15 +233,4 @@ export function useSize(ref: RefObject<HTMLElement | null>): { width: number; re
     return () => observer.disconnect();
   }, [ref]);
   return size;
-}
-
-/** The pig snout that stands in for the first O of the wordmark. */
-export function Snout({ className = "" }: { className?: string }) {
-  return (
-    <svg className={`snout ${className}`} viewBox="0 0 120 100" aria-hidden="true">
-      <ellipse cx="60" cy="50" rx="52" ry="42" className="snout-face" />
-      <ellipse cx="41" cy="50" rx="9" ry="15" className="snout-hole" />
-      <ellipse cx="79" cy="50" rx="9" ry="15" className="snout-hole" />
-    </svg>
-  );
 }

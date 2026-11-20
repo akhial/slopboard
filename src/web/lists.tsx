@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Board } from "../shared/api.ts";
 import { rangeInfo } from "./data.ts";
 import { clockFor, compact, full, pct, usd } from "./format.ts";
+import { Cutout } from "./art.tsx";
 import { castOf, personStyle, SectionHead, SplitBar, Who } from "./ui.tsx";
 
 export function Models({ board }: { board: Board }) {
@@ -12,7 +13,8 @@ export function Models({ board }: { board: Board }) {
   const max = Math.max(1, ...board.models.map((m) => m.tokens.total));
   const sum = board.models.reduce((s, m) => s + m.tokens.total, 0);
   return (
-    <section className="models panel" aria-labelledby="models-title">
+    <section className="models panel has-art" aria-labelledby="models-title">
+      <Cutout name="cloche" className="panel-art" />
       <SectionHead id="models-title" title="On the" mark="menu" note={`What everyone ordered ${info.phrase}. Prices are public API list rates — nobody's card was charged.`} />
       {board.models.length === 0 ? (
         <p className="panel-empty">Kitchen's closed. Nothing ordered yet.</p>
@@ -85,7 +87,8 @@ export function Feed({ board }: { board: Board }) {
 
   const shown = open ? events : events.slice(0, COLLAPSED);
   return (
-    <section className="feed panel" aria-labelledby="feed-title">
+    <section className="feed slab has-art" aria-labelledby="feed-title">
+      <Cutout name="telephone" className="panel-art" />
       <SectionHead id="feed-title" title="Live" mark="wiretap" note="Every request as it hits the proxy, newest first. Nowhere to hide." />
       {events.length === 0 ? (
         <p className="panel-empty">Nothing on the wire yet. Go on, ask it to rewrite the whole codebase.</p>
