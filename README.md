@@ -1,5 +1,3 @@
-# Slopboard
-
 ![Slopboard: the leader's card, the week's total and the team's numbers](docs/slopboard.png)
 
 Who burned the most tokens, on which model, in which thread, with how many
