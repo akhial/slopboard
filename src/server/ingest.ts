@@ -1,7 +1,7 @@
 // Turns the proxy's usage records into `events` rows and stores them.
 //
 // Record shape: `queuedUsageDetail` in CLIProxyAPI internal/redisqueue/plugin.go.
-// The semantics relied on here are written up in README.md ("What the proxy sends").
+// The semantics relied on here are written up in README.md ("The data model").
 
 import type { Db } from "./db.ts";
 
