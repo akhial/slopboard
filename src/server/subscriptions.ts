@@ -48,7 +48,7 @@ const DEFAULT_PLAN_PRICES: Record<string, Record<string, number>> = {
     team: 30,
   },
   antigravity: {
-    ultra: 250,
+    ultra: 200,
     pro: 20,
     free: 0,
   },
