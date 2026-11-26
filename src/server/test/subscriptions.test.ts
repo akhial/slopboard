@@ -659,7 +659,7 @@ describe("end-to-end subscription sync, board and CLI", () => {
     expect(Number(lateRows[0]!.sub_cost_usd)).toBeCloseTo(0.1 * (200 / cycle.scheduledWeeks), 5);
     expect(Number(lateRows[1]!.sub_cost_usd)).toBeCloseTo(0.2 * (200 / cycle.scheduledWeeks), 5);
 
-    // Antigravity ultra ($250/mo auto-discovered) split +20% equally across the two equal-token events (10% each)!
+    // Antigravity ultra ($200/mo auto-discovered) split +20% equally across the two equal-token events (10% each)!
     const agRows = await db.sql<{ model: string; quota_weeks: string | null; sub_cost_usd: string | null }[]>`
       select model, quota_weeks, sub_cost_usd from events
       where provider = 'antigravity' and source = 'ag-metered@example.com'
@@ -667,7 +667,7 @@ describe("end-to-end subscription sync, board and CLI", () => {
     expect(agRows).toHaveLength(2);
     expect(Number(agRows[0]!.quota_weeks)).toBeCloseTo(0.1, 6);
     expect(Number(agRows[1]!.quota_weeks)).toBeCloseTo(0.1, 6);
-    expect(Number(agRows[0]!.sub_cost_usd)).toBeCloseTo(0.1 * (250 / cycle.scheduledWeeks), 5);
-    expect(Number(agRows[1]!.sub_cost_usd)).toBeCloseTo(0.1 * (250 / cycle.scheduledWeeks), 5);
+    expect(Number(agRows[0]!.sub_cost_usd)).toBeCloseTo(0.1 * (200 / cycle.scheduledWeeks), 5);
+    expect(Number(agRows[1]!.sub_cost_usd)).toBeCloseTo(0.1 * (200 / cycle.scheduledWeeks), 5);
   });
 });
