@@ -334,6 +334,8 @@ export interface ModelWeights {
   tokenBaselineRate: number;
   /** Per-model multiplier relative to baselineRate (models absent here use 1.0). */
   multipliers: Map<string, number>;
+  /** Per-model multiplier relative to tokenBaselineRate for unpriced/mixed providers (e.g. Antigravity). */
+  tokenMultipliers?: Map<string, number>;
 }
 
 /** Solves A * x = b via Gaussian elimination with partial pivoting; returns null if singular. */
@@ -362,12 +364,78 @@ function solveLinear(A: number[][], b: number[]): number[] | null {
   return M.map((row) => row[n]!);
 }
 
+function fitRelativeMultipliers(
+  chunks: readonly QuotaChunk[],
+  volumeOf: (ch: QuotaChunk) => Map<string, number> | undefined,
+  baselineRate: number,
+  totalVolume: number,
+  modelTotals: ReadonlyMap<string, number>,
+): Map<string, number> {
+  const multipliers = new Map<string, number>();
+  if (baselineRate <= 0 || totalVolume <= 0 || chunks.length < 6) return multipliers;
+
+  // Include models accounting for at least 5% of total volume (up to 12 models).
+  const major = [...modelTotals.entries()]
+    .filter(([, vol]) => vol / totalVolume >= 0.05)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 12)
+    .map(([m]) => m);
+
+  if (major.length < 2) return multipliers;
+
+  const k = major.length;
+  const idxOf = new Map(major.map((m, i) => [m, i]));
+  const XtX: number[][] = Array.from({ length: k }, () => new Array<number>(k).fill(0));
+  const Xtr: number[] = new Array<number>(k).fill(0);
+
+  for (const ch of chunks) {
+    if (!(ch.dqWeeks > 0)) continue;
+    const byModel = volumeOf(ch);
+    if (!byModel || byModel.size === 0) continue;
+    const x = new Array<number>(k).fill(0);
+    let minorVol = 0;
+    for (const [m, vol] of byModel) {
+      if (!(vol > 0)) continue;
+      const idx = idxOf.get(m);
+      if (idx !== undefined) x[idx]! += vol;
+      else minorVol += vol;
+    }
+    // Solve for delta where w_m = baselineRate * (1 + delta_m).
+    // Residual: y - baselineRate * (sum(x) + minorVol) = baselineRate * sum(x_m * delta_m).
+    const majorSum = x.reduce((s, v) => s + v, 0);
+    if (majorSum <= 0) continue;
+    const residual = ch.dqWeeks / baselineRate - (majorSum + minorVol);
+    for (let i = 0; i < k; i++) {
+      if (x[i] === 0) continue;
+      Xtr[i]! += x[i]! * residual;
+      for (let j = 0; j < k; j++) {
+        XtX[i]![j]! += x[i]! * x[j]!;
+      }
+    }
+  }
+
+  // Scale-invariant per-column ridge (1% of each model's own diagonal) so heavy-quota
+  // models with smaller raw totals are not over-shrunk relative to larger ones.
+  for (let i = 0; i < k; i++) {
+    if (!(XtX[i]![i]! > 0)) return multipliers;
+    XtX[i]![i]! *= 1.01;
+  }
+
+  const delta = solveLinear(XtX, Xtr);
+  if (!delta) return multipliers;
+
+  for (let i = 0; i < k; i++) {
+    const mult = Math.min(10, Math.max(0.1, 1 + delta[i]!));
+    if (Number.isFinite(mult)) multipliers.set(major[i]!, mult);
+  }
+  return multipliers;
+}
+
 /**
  * Fits relative quota-burn multipliers per model from observed interior ~5%
  * quota chunks using ridge-regularized least squares shrunk gently toward 1.0.
- * For example, on Claude Max20x this automatically learns that Fable burns
- * ~2.4x more weekly quota per LiteLLM API dollar than Opus, without hardcoding
- * model names or ratios.
+ * Fits both API-dollar multipliers (e.g. Claude Fable vs Opus) and
+ * effective-token multipliers (for unpriced providers like Antigravity).
  */
 export function fitModelWeights(chunks: readonly QuotaChunk[]): ModelWeights {
   let totalDq = 0;
@@ -375,6 +443,7 @@ export function fitModelWeights(chunks: readonly QuotaChunk[]): ModelWeights {
   let totalTokenDq = 0;
   let totalEffTokens = 0;
   const modelTotals = new Map<string, number>();
+  const modelTokTotals = new Map<string, number>();
 
   for (const ch of chunks) {
     if (!(ch.dqWeeks > 0)) continue;
@@ -390,8 +459,10 @@ export function fitModelWeights(chunks: readonly QuotaChunk[]): ModelWeights {
     }
     if (ch.byModelEffTokens) {
       let tokSum = 0;
-      for (const tok of ch.byModelEffTokens.values()) {
-        if (tok > 0) tokSum += tok;
+      for (const [m, tok] of ch.byModelEffTokens) {
+        if (!(tok > 0)) continue;
+        tokSum += tok;
+        modelTokTotals.set(m, (modelTokTotals.get(m) ?? 0) + tok);
       }
       if (tokSum > 0) {
         totalTokenDq += ch.dqWeeks;
@@ -402,62 +473,15 @@ export function fitModelWeights(chunks: readonly QuotaChunk[]): ModelWeights {
 
   const baselineRate = totalUsd > 0 ? totalDq / totalUsd : 0;
   const tokenBaselineRate = totalEffTokens > 0 ? totalTokenDq / totalEffTokens : 0;
-  const multipliers = new Map<string, number>();
-  if (baselineRate <= 0 || chunks.length < 6) return { baselineRate, tokenBaselineRate, multipliers };
-
-  // Include models accounting for at least 5% of total API spend (up to 12 models).
-  const major = [...modelTotals.entries()]
-    .filter(([, usd]) => usd / totalUsd >= 0.05)
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .slice(0, 12)
-    .map(([m]) => m);
-
-  if (major.length < 2) return { baselineRate, tokenBaselineRate, multipliers };
-
-  const k = major.length;
-  const idxOf = new Map(major.map((m, i) => [m, i]));
-  const XtX: number[][] = Array.from({ length: k }, () => new Array<number>(k).fill(0));
-  const Xtr: number[] = new Array<number>(k).fill(0);
-
-  for (const ch of chunks) {
-    if (!(ch.dqWeeks > 0)) continue;
-    const x = new Array<number>(k).fill(0);
-    let minorUsd = 0;
-    for (const [m, usd] of ch.byModelApiUsd) {
-      if (!(usd > 0)) continue;
-      const idx = idxOf.get(m);
-      if (idx !== undefined) x[idx]! += usd;
-      else minorUsd += usd;
-    }
-    // Solve for delta where w_m = baselineRate * (1 + delta_m).
-    // Residual: y - baselineRate * (sum(x) + minorUsd) = baselineRate * sum(x_m * delta_m).
-    const majorSum = x.reduce((s, v) => s + v, 0);
-    if (majorSum <= 0) continue;
-    const residual = ch.dqWeeks / baselineRate - (majorSum + minorUsd);
-    for (let i = 0; i < k; i++) {
-      if (x[i] === 0) continue;
-      Xtr[i]! += x[i]! * residual;
-      for (let j = 0; j < k; j++) {
-        XtX[i]![j]! += x[i]! * x[j]!;
-      }
-    }
-  }
-
-  // Scale-invariant per-column ridge (1% of each model's own diagonal) so heavy-quota
-  // models with smaller raw API dollar totals are not over-shrunk relative to larger ones.
-  for (let i = 0; i < k; i++) {
-    if (!(XtX[i]![i]! > 0)) return { baselineRate, tokenBaselineRate, multipliers };
-    XtX[i]![i]! *= 1.01;
-  }
-
-  const delta = solveLinear(XtX, Xtr);
-  if (!delta) return { baselineRate, tokenBaselineRate, multipliers };
-
-  for (let i = 0; i < k; i++) {
-    const mult = Math.min(10, Math.max(0.1, 1 + delta[i]!));
-    if (Number.isFinite(mult)) multipliers.set(major[i]!, mult);
-  }
-  return { baselineRate, tokenBaselineRate, multipliers };
+  const multipliers = fitRelativeMultipliers(chunks, (ch) => ch.byModelApiUsd, baselineRate, totalUsd, modelTotals);
+  const tokenMultipliers = fitRelativeMultipliers(
+    chunks,
+    (ch) => ch.byModelEffTokens,
+    tokenBaselineRate,
+    totalEffTokens,
+    modelTokTotals,
+  );
+  return { baselineRate, tokenBaselineRate, multipliers, tokenMultipliers };
 }
 
 // ------------------------------------------------------------ tick-by-tick attribution
@@ -686,6 +710,12 @@ export function attributeAccountEvents(
     return api * (opts.weights.multipliers.get(ev.model) ?? 1);
   };
 
+  const tokenWeight = (ev: AttrEvent): number => {
+    const tok = effectiveTokensOf(ev);
+    if (tok <= 0) return 0;
+    return tok * (opts.weights.tokenMultipliers?.get(ev.model) ?? 1);
+  };
+
   const batchCanUseApiCost = (evs: readonly AttrEvent[]): boolean => {
     let anyPriced = false;
     for (const ev of evs) {
@@ -710,11 +740,11 @@ export function attributeAccountEvents(
     const useApiCost = batchCanUseApiCost(batch);
     let totalW = 0;
     for (const ev of batch) {
-      totalW += useApiCost ? apiWeight(ev) : effectiveTokensOf(ev);
+      totalW += useApiCost ? apiWeight(ev) : tokenWeight(ev);
     }
     if (totalW > 0) {
       for (const ev of batch) {
-        const w = useApiCost ? apiWeight(ev) : effectiveTokensOf(ev);
+        const w = useApiCost ? apiWeight(ev) : tokenWeight(ev);
         const q = dqWeeks * (w / totalW);
         out.set(ev.eventId, { quotaWeeks: q, subCostUsd: priceOf(ev.tsMs, q) });
       }
@@ -739,7 +769,7 @@ export function attributeAccountEvents(
     }
     if (opts.weights.tokenBaselineRate > 0) {
       let sum = 0;
-      for (const ev of evs) sum += effectiveTokensOf(ev) * opts.weights.tokenBaselineRate;
+      for (const ev of evs) sum += tokenWeight(ev) * opts.weights.tokenBaselineRate;
       return sum;
     }
     return 0;
@@ -831,6 +861,9 @@ export function attributeAccountEvents(
 
     if (it.usedPct !== null) {
       if (hw === null) {
+        // Flush events that predated the very first poll sample so they use the
+        // calibrated baseline rate instead of distorting the first observed interval.
+        if (it.kind === "sample" && batch.length > 0) flushTrailing();
         hw = it.usedPct;
       } else if (it.usedPct > hw) {
         const dq = (it.usedPct - hw) / 100;
@@ -1173,9 +1206,11 @@ export async function recomputeSubscriptionCosts(sql: Db): Promise<RecomputeResu
     }
   }
 
-  // Clear stale sub_cost_usd on events with no source (if any).
+  // Serialize concurrent recomputes (e.g. CLI + daemon) via a transaction-scoped
+  // advisory lock so bulk updates never contend on row-level transactionid locks.
   if (updateIds.length > 0) {
     await sql.begin(async (tx) => {
+      await tx`select pg_advisory_xact_lock(hashtext('slopboard_subscriptions_recompute'))`;
       for (let i = 0; i < updateIds.length; i += 5000) {
         const ids = updateIds.slice(i, i + 5000);
         const weeks = updateWeeks.slice(i, i + 5000);

@@ -153,6 +153,29 @@ describe("empirical model weighting and tick attribution", () => {
     expect(weights.multipliers.has("claude-haiku-5-5")).toBe(false);
   });
 
+  test("learns per-model effective-token multipliers for unpriced providers like Antigravity", () => {
+    // Ground truth: flash = 1e-9 wk/tok, neon = 3e-9 wk/tok (3x heavier per effective token).
+    const chunks: QuotaChunk[] = [];
+    for (let i = 0; i < 20; i++) {
+      const flashTok = (10 + (i % 5) * 8) * 1e6;
+      const neonTok = Math.max(0, (0.05 - flashTok * 1e-9) / 3e-9);
+      chunks.push({
+        dqWeeks: 0.05,
+        byModelApiUsd: new Map(),
+        byModelEffTokens: new Map([
+          ["gemini-3.8-flash-low", flashTok],
+          ["gemini-4-neon-high", neonTok],
+        ]),
+      });
+    }
+    const weights = fitModelWeights(chunks);
+    expect(weights.tokenBaselineRate).toBeGreaterThan(0);
+    const flashM = weights.tokenMultipliers!.get("gemini-3.8-flash-low")!;
+    const neonM = weights.tokenMultipliers!.get("gemini-4-neon-high")!;
+    expect(neonM / flashM).toBeGreaterThan(2.6);
+    expect(neonM / flashM).toBeLessThan(3.3);
+  });
+
   test("conserves exact quota across ticks and ignores out-of-order jitter and stale post-reset headers", () => {
     const t0 = Date.UTC(2026, 10, 20, 10, 0);
     const reset1 = t0 + 5 * DAY;
