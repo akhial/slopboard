@@ -174,7 +174,7 @@ describe("empirical model weighting and tick attribution", () => {
     ];
 
     const res = attributeAccountEvents(events, [], {
-      weights: { baselineRate: 0, multipliers: new Map() },
+      weights: { baselineRate: 0, tokenBaselineRate: 0, multipliers: new Map() },
       costPerWeekAt: () => 50, // $50 / week
       ignored: false,
     });
@@ -209,7 +209,7 @@ describe("empirical model weighting and tick attribution", () => {
       { tsMs: t0 + 5000, usedPct: 60, resetAtMs: reset }, // +50% of a weekly quota!
     ];
     const res = attributeAccountEvents(events, samples, {
-      weights: { baselineRate: 0, multipliers: new Map() },
+      weights: { baselineRate: 0, tokenBaselineRate: 0, multipliers: new Map() },
       costPerWeekAt: () => 50,
       ignored: false,
     });
@@ -218,6 +218,68 @@ describe("empirical model weighting and tick attribution", () => {
     expect(res.get("a")!.subCostUsd).toBeCloseTo(6.25, 10);
     expect(res.get("b")!.quotaWeeks).toBeCloseTo(0.375, 10);
     expect(res.get("b")!.subCostUsd).toBeCloseTo(18.75, 10);
+  });
+
+  test("attributes initial nonzero burn after a scheduled reset for both header and poll-only streams", () => {
+    const t0 = Date.UTC(2026, 10, 20, 10, 0);
+    const reset1 = t0 + 10_000;
+    const reset2 = reset1 + 7 * DAY;
+
+    // 1) Header stream: first new-window event already reports 10%, next reports 20% -> full 20% attributed.
+    const headerEvents: AttrEvent[] = [
+      { eventId: "old", tsMs: t0, model: "opus", apiCostUsd: 10, totalTokens: 1000, failed: false, quotaUsedPct: 80, quotaResetAtMs: reset1 },
+      { eventId: "new1", tsMs: reset1 + 1000, model: "opus", apiCostUsd: 10, totalTokens: 1000, failed: false, quotaUsedPct: 10, quotaResetAtMs: reset2 },
+      { eventId: "new2", tsMs: reset1 + 2000, model: "opus", apiCostUsd: 10, totalTokens: 1000, failed: false, quotaUsedPct: 20, quotaResetAtMs: reset2 },
+    ];
+    const headerRes = attributeAccountEvents(headerEvents, [], {
+      weights: { baselineRate: 0, tokenBaselineRate: 0, multipliers: new Map() },
+      costPerWeekAt: () => 50,
+      ignored: false,
+    });
+    expect(headerRes.get("new1")!.quotaWeeks).toBeCloseTo(0.1, 10);
+    expect(headerRes.get("new2")!.quotaWeeks).toBeCloseTo(0.1, 10);
+
+    // 2) Poll-only stream (e.g. Antigravity): headerless event arrives after reset1 before next poll at 12%.
+    const pollEvents: AttrEvent[] = [
+      { eventId: "pre", tsMs: reset1 - 5000, model: "gemini-4-neon", apiCostUsd: null, totalTokens: 1000, effectiveTokens: 1000, failed: false, quotaUsedPct: null, quotaResetAtMs: null },
+      { eventId: "post1", tsMs: reset1 + 1000, model: "gemini-4-neon", apiCostUsd: null, totalTokens: 1000, effectiveTokens: 1000, failed: false, quotaUsedPct: null, quotaResetAtMs: null },
+      { eventId: "post2", tsMs: reset1 + 2000, model: "gemini-4-neon", apiCostUsd: null, totalTokens: 3000, effectiveTokens: 3000, failed: false, quotaUsedPct: null, quotaResetAtMs: null },
+    ];
+    const pollSamples: QuotaPoint[] = [
+      { tsMs: t0, usedPct: 90, resetAtMs: reset1 },
+      { tsMs: reset1 + 5000, usedPct: 12, resetAtMs: reset2 },
+    ];
+    const pollRes = attributeAccountEvents(pollEvents, pollSamples, {
+      weights: { baselineRate: 0, tokenBaselineRate: 0, multipliers: new Map() },
+      costPerWeekAt: () => 50,
+      ignored: false,
+    });
+    expect(pollRes.get("post1")!.quotaWeeks).toBeCloseTo(0.03, 10);
+    expect(pollRes.get("post2")!.quotaWeeks).toBeCloseTo(0.09, 10);
+  });
+
+  test("distributes mixed priced/unpriced batches by effectiveTokens instead of zeroing unpriced models", () => {
+    const t0 = Date.UTC(2026, 10, 20, 10, 0);
+    const reset = t0 + 7 * DAY;
+    const events: AttrEvent[] = [
+      // Unpriced model (e.g. gemini-4-neon-high) with 3x the effective tokens
+      { eventId: "unpriced", tsMs: t0 + 1000, model: "gemini-4-neon-high", apiCostUsd: null, totalTokens: 3000, effectiveTokens: 3000, failed: false, quotaUsedPct: null, quotaResetAtMs: null },
+      // Priced model (e.g. gemini-3.1-flash-lite) in the same poll interval
+      { eventId: "priced", tsMs: t0 + 2000, model: "gemini-3.1-flash-lite", apiCostUsd: 0.05, totalTokens: 1000, effectiveTokens: 1000, failed: false, quotaUsedPct: null, quotaResetAtMs: null },
+    ];
+    const samples: QuotaPoint[] = [
+      { tsMs: t0, usedPct: 10, resetAtMs: reset },
+      { tsMs: t0 + 5000, usedPct: 30, resetAtMs: reset }, // +20% weekly quota
+    ];
+    const res = attributeAccountEvents(events, samples, {
+      weights: { baselineRate: 0, tokenBaselineRate: 0, multipliers: new Map() },
+      costPerWeekAt: () => 50,
+      ignored: false,
+    });
+    expect(res.get("unpriced")!.quotaWeeks).toBeCloseTo(0.15, 10);
+    expect(res.get("priced")!.quotaWeeks).toBeCloseTo(0.05, 10);
+    expect(res.get("unpriced")!.subCostUsd).toBeCloseTo(7.5, 10);
+    expect(res.get("priced")!.subCostUsd).toBeCloseTo(2.5, 10);
   });
 });
 
@@ -469,5 +531,120 @@ describe("end-to-end subscription sync, board and CLI", () => {
     expect(delRes.code).toBe(0);
     const recomputeRes = await recomputeSubscriptionCosts(db.sql);
     expect(recomputeRes.accounts).toBeGreaterThanOrEqual(3);
+  });
+
+  test("ignore-before-sync restores auto plan default on unignore, preserves ms ordering, and meters Antigravity via quota_samples", async () => {
+    const now = Date.now();
+    // Anchor on a clean whole second 1 hour ago so sub-second offsets stay inside one second.
+    const baseSec = Math.floor((now - HOUR) / 1000) * 1000;
+    const reset = baseSec + 6 * DAY;
+
+    // 1) Ignore a brand-new Claude account BEFORE any quota_samples exist, then sync, then unignore.
+    const preIgnore = await cli(["subscriptions", "ignore", "claude", "late@example.com"]);
+    expect(preIgnore.code).toBe(0);
+
+    proxy.quotaHistory = {
+      enabled: true,
+      now,
+      poll_interval_seconds: 600,
+      accounts: [
+        {
+          auth_id: "claude-late",
+          auth_index: "idx10",
+          file_name: "claude-late.json",
+          provider: "claude",
+          label: "late@example.com",
+          email: "late@example.com",
+          plan: "max20",
+          windows: [
+            { id: "seven_day", period_seconds: 604800, points: [[baseSec - 60_000, 0, reset]] },
+          ],
+        },
+        {
+          auth_id: "ag-ultra",
+          auth_index: "idx11",
+          file_name: "antigravity-ag.json",
+          provider: "antigravity",
+          label: "ag-metered@example.com",
+          email: "ag-metered@example.com",
+          plan: "ultra",
+          windows: [
+            {
+              id: "seven_day",
+              period_seconds: 604800,
+              points: [
+                [baseSec, 10, reset],
+                [baseSec + 10_000, 30, reset], // +20% of weekly quota
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const usage = { input: 100_000, cacheRead: 0, cacheWrite: 0, answer: 10_000, reasoning: 0 };
+    const hdr = (frac: number) => ({
+      "Anthropic-Ratelimit-Unified-7d-Utilization": [String(frac)],
+      "Anthropic-Ratelimit-Unified-7d-Reset": [String(Math.floor(reset / 1000))],
+    });
+
+    await insertEvents(db.sql, [
+      // Sub-second ordering: "z-first" at .100 (10%) must sort before "a-second" at .900 (30%).
+      // If timestamps were truncated to whole seconds, lexical tie-break would invert them!
+      {
+        ...normalizeRecord(usageRecord({ kind: "claude", at: new Date(baseSec + 100), apiKey: KEY_ADA, model: "priced-model", source: "late@example.com", usage, responseHeaders: hdr(0.1) }))!,
+        event_id: "z-first",
+      },
+      {
+        ...normalizeRecord(usageRecord({ kind: "claude", at: new Date(baseSec + 900), apiKey: KEY_BOB, model: "priced-model", source: "late@example.com", usage, responseHeaders: hdr(0.3) }))!,
+        event_id: "a-second",
+      },
+      // Antigravity poll-only events: unpriced gemini-4-neon + priced model in the same 20% interval
+      normalizeRecord({
+        ...usageRecord({ kind: "gemini", at: new Date(baseSec + 2000), apiKey: KEY_ADA, model: "gemini-4-neon-high", source: "ag-metered@example.com", usage }),
+        provider: "antigravity",
+      })!,
+      normalizeRecord({
+        ...usageRecord({ kind: "gemini", at: new Date(baseSec + 3000), apiKey: KEY_BOB, model: "priced-model", source: "ag-metered@example.com", usage }),
+        provider: "antigravity",
+      })!,
+    ]);
+
+    const client = new ProxyClient(proxy.url, proxy.managementKey);
+    await syncQuotaHistory(db.sql, client);
+
+    // While ignored, late@example.com events cost $0.
+    const ignoredRows = await db.sql<{ sub_cost_usd: string | null }[]>`
+      select sub_cost_usd from events where provider = 'claude' and source = 'late@example.com'`;
+    expect(ignoredRows.every((r) => Number(r.sub_cost_usd) === 0)).toBe(true);
+
+    // Unignoring restores auto-discovered max20 ($200/mo) instead of pinning $0!
+    const unignore = await cli(["subscriptions", "unignore", "claude", "late@example.com"]);
+    expect(unignore.code).toBe(0);
+    expect(unignore.stdout).toContain("auto plan default");
+
+    const cycle = billingCycleFor(baseSec, 1);
+    const lateRows = await db.sql<{ event_id: string; quota_weeks: string | null; sub_cost_usd: string | null }[]>`
+      select event_id, quota_weeks, sub_cost_usd from events
+      where provider = 'claude' and source = 'late@example.com'
+      order by ts asc`;
+    // Both events inside the same second were ordered properly: z-first (.100) got 10%, a-second (.900) got 20%!
+    expect(lateRows[0]!.event_id).toBe("z-first");
+    expect(lateRows[1]!.event_id).toBe("a-second");
+    expect(Number(lateRows[0]!.quota_weeks)).toBeCloseTo(0.1, 10);
+    expect(Number(lateRows[1]!.quota_weeks)).toBeCloseTo(0.2, 10);
+    expect(Number(lateRows[0]!.sub_cost_usd)).toBeCloseTo(0.1 * (200 / cycle.scheduledWeeks), 5);
+    expect(Number(lateRows[1]!.sub_cost_usd)).toBeCloseTo(0.2 * (200 / cycle.scheduledWeeks), 5);
+
+    // Antigravity ultra ($250/mo auto-discovered) split +20% equally across the two equal-token events (10% each)!
+    const agRows = await db.sql<{ model: string; quota_weeks: string | null; sub_cost_usd: string | null }[]>`
+      select model, quota_weeks, sub_cost_usd from events
+      where provider = 'antigravity' and source = 'ag-metered@example.com'
+      order by ts asc`;
+    expect(agRows).toHaveLength(2);
+    expect(Number(agRows[0]!.quota_weeks)).toBeCloseTo(0.1, 6);
+    expect(Number(agRows[1]!.quota_weeks)).toBeCloseTo(0.1, 6);
+    expect(Number(agRows[0]!.sub_cost_usd)).toBeCloseTo(0.1 * (250 / cycle.scheduledWeeks), 5);
+    expect(Number(agRows[1]!.sub_cost_usd)).toBeCloseTo(0.1 * (250 / cycle.scheduledWeeks), 5);
   });
 });

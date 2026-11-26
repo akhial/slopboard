@@ -59,7 +59,8 @@ create table subscriptions (
   provider         text not null,
   source           text not null,
   plan             text,
-  monthly_cost_usd numeric not null check (monthly_cost_usd >= 0),
+  -- Null means "use the discovered plan default" (e.g. for an ignore-only row).
+  monthly_cost_usd numeric check (monthly_cost_usd is null or monthly_cost_usd >= 0),
   billing_day      integer check (billing_day between 1 and 31),
   ignored          boolean not null default false,
   note             text,

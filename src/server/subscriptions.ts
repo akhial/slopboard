@@ -47,7 +47,25 @@ const DEFAULT_PLAN_PRICES: Record<string, Record<string, number>> = {
     plus: 20,
     team: 30,
   },
+  antigravity: {
+    ultra: 250,
+    pro: 20,
+    free: 0,
+  },
 };
+
+/** Preserves full millisecond precision when Bun SQL returns Date instances. */
+function toMs(value: unknown): number {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === "number") return value;
+  return Date.parse(String(value));
+}
+
+function toMsOrNull(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  const ms = toMs(value);
+  return Number.isFinite(ms) ? ms : null;
+}
 
 export function defaultPlanMonthlyCost(provider: string, plan: string | null | undefined): number | null {
   if (!plan) return null;
@@ -305,11 +323,15 @@ export function analyzeBillingCycles(
 export interface QuotaChunk {
   dqWeeks: number;
   byModelApiUsd: Map<string, number>;
+  /** Effective token volume (input + 0.1*cacheRead + 1.25*cacheWrite + 5*output) for unpriced models like Antigravity. */
+  byModelEffTokens?: Map<string, number>;
 }
 
 export interface ModelWeights {
   /** Baseline weekly-quota fraction per API list dollar (e.g. 1 / 3000 for Claude Max20). */
   baselineRate: number;
+  /** Baseline weekly-quota fraction per effective token (fallback when API list prices are absent, e.g. Antigravity). */
+  tokenBaselineRate: number;
   /** Per-model multiplier relative to baselineRate (models absent here use 1.0). */
   multipliers: Map<string, number>;
 }
@@ -350,6 +372,8 @@ function solveLinear(A: number[][], b: number[]): number[] | null {
 export function fitModelWeights(chunks: readonly QuotaChunk[]): ModelWeights {
   let totalDq = 0;
   let totalUsd = 0;
+  let totalTokenDq = 0;
+  let totalEffTokens = 0;
   const modelTotals = new Map<string, number>();
 
   for (const ch of chunks) {
@@ -364,11 +388,22 @@ export function fitModelWeights(chunks: readonly QuotaChunk[]): ModelWeights {
       totalDq += ch.dqWeeks;
       totalUsd += sum;
     }
+    if (ch.byModelEffTokens) {
+      let tokSum = 0;
+      for (const tok of ch.byModelEffTokens.values()) {
+        if (tok > 0) tokSum += tok;
+      }
+      if (tokSum > 0) {
+        totalTokenDq += ch.dqWeeks;
+        totalEffTokens += tokSum;
+      }
+    }
   }
 
   const baselineRate = totalUsd > 0 ? totalDq / totalUsd : 0;
+  const tokenBaselineRate = totalEffTokens > 0 ? totalTokenDq / totalEffTokens : 0;
   const multipliers = new Map<string, number>();
-  if (baselineRate <= 0 || chunks.length < 6) return { baselineRate, multipliers };
+  if (baselineRate <= 0 || chunks.length < 6) return { baselineRate, tokenBaselineRate, multipliers };
 
   // Include models accounting for at least 5% of total API spend (up to 12 models).
   const major = [...modelTotals.entries()]
@@ -377,7 +412,7 @@ export function fitModelWeights(chunks: readonly QuotaChunk[]): ModelWeights {
     .slice(0, 12)
     .map(([m]) => m);
 
-  if (major.length < 2) return { baselineRate, multipliers };
+  if (major.length < 2) return { baselineRate, tokenBaselineRate, multipliers };
 
   const k = major.length;
   const idxOf = new Map(major.map((m, i) => [m, i]));
@@ -411,18 +446,18 @@ export function fitModelWeights(chunks: readonly QuotaChunk[]): ModelWeights {
   // Scale-invariant per-column ridge (1% of each model's own diagonal) so heavy-quota
   // models with smaller raw API dollar totals are not over-shrunk relative to larger ones.
   for (let i = 0; i < k; i++) {
-    if (!(XtX[i]![i]! > 0)) return { baselineRate, multipliers };
+    if (!(XtX[i]![i]! > 0)) return { baselineRate, tokenBaselineRate, multipliers };
     XtX[i]![i]! *= 1.01;
   }
 
   const delta = solveLinear(XtX, Xtr);
-  if (!delta) return { baselineRate, multipliers };
+  if (!delta) return { baselineRate, tokenBaselineRate, multipliers };
 
   for (let i = 0; i < k; i++) {
     const mult = Math.min(10, Math.max(0.1, 1 + delta[i]!));
     if (Number.isFinite(mult)) multipliers.set(major[i]!, mult);
   }
-  return { baselineRate, multipliers };
+  return { baselineRate, tokenBaselineRate, multipliers };
 }
 
 // ------------------------------------------------------------ tick-by-tick attribution
@@ -433,6 +468,8 @@ export interface AttrEvent {
   model: string;
   apiCostUsd: number | null;
   totalTokens: number;
+  /** Token cost proxy (input + 0.1*cacheRead + 1.25*cacheWrite + 5*output) for unpriced/mixed batches. */
+  effectiveTokens?: number;
   failed: boolean;
   quotaUsedPct: number | null;
   quotaResetAtMs: number | null;
@@ -479,6 +516,11 @@ function isTransientStreamDrop(items: readonly StreamItem[], index: number, high
   return false;
 }
 
+function effectiveTokensOf(ev: AttrEvent): number {
+  if (ev.effectiveTokens !== undefined && ev.effectiveTokens > 0) return ev.effectiveTokens;
+  return ev.totalTokens > 0 ? ev.totalTokens : 0;
+}
+
 /**
  * First pass over one account's stream: collects interior ~5% quota chunks
  * (for empirical model-weight fitting across all accounts of the same plan).
@@ -497,14 +539,56 @@ export function collectQuotaChunks(
 
   let chunkDq = 0;
   let chunkByModel = new Map<string, number>();
-  let batchByModel = new Map<string, number>();
+  let chunkByModelTok = new Map<string, number>();
+  let batchEvents: AttrEvent[] = [];
 
   const resetSegment = (newHw: number | null, newResetAt: number | null) => {
     chunkDq = 0;
     chunkByModel = new Map();
-    batchByModel = new Map();
+    chunkByModelTok = new Map();
+    batchEvents = [];
     hw = newHw;
     if (newResetAt !== null) curResetAtMs = newResetAt;
+  };
+
+  const absorbDelta = (dq: number) => {
+    // Skip huge single jumps (> 10%) as they usually indicate an unrecorded gap.
+    if (dq > 0 && dq <= 0.1) {
+      let batchAllPriced = true;
+      const batchByModel = new Map<string, number>();
+      const batchByModelTok = new Map<string, number>();
+      for (const ev of batchEvents) {
+        const tok = effectiveTokensOf(ev);
+        if (tok > 0) {
+          batchByModelTok.set(ev.model, (batchByModelTok.get(ev.model) ?? 0) + tok);
+          if (ev.apiCostUsd !== null && ev.apiCostUsd > 0) {
+            batchByModel.set(ev.model, (batchByModel.get(ev.model) ?? 0) + ev.apiCostUsd);
+          } else {
+            batchAllPriced = false;
+          }
+        }
+      }
+      chunkDq += dq;
+      if (batchAllPriced) {
+        for (const [m, usd] of batchByModel) {
+          chunkByModel.set(m, (chunkByModel.get(m) ?? 0) + usd);
+        }
+      }
+      for (const [m, tok] of batchByModelTok) {
+        chunkByModelTok.set(m, (chunkByModelTok.get(m) ?? 0) + tok);
+      }
+      if (chunkDq >= 0.045) {
+        chunks.push({ dqWeeks: chunkDq, byModelApiUsd: chunkByModel, byModelEffTokens: chunkByModelTok });
+        chunkDq = 0;
+        chunkByModel = new Map();
+        chunkByModelTok = new Map();
+      }
+    } else {
+      chunkDq = 0;
+      chunkByModel = new Map();
+      chunkByModelTok = new Map();
+    }
+    batchEvents = [];
   };
 
   for (let i = 0; i < items.length; i++) {
@@ -518,54 +602,43 @@ export function collectQuotaChunks(
       it.usedPct > hw + 10;
 
     if (staleReset || staleBounce) {
-      if (it.kind === "event" && it.ev.apiCostUsd && it.ev.apiCostUsd > 0) {
-        batchByModel.set(it.ev.model, (batchByModel.get(it.ev.model) ?? 0) + it.ev.apiCostUsd);
-      }
+      if (it.kind === "event") batchEvents.push(it.ev);
       continue;
     }
 
     const raAdvanced = curResetAtMs !== null && it.resetAtMs !== null && it.resetAtMs > curResetAtMs + RESET_MERGE_MS;
     const drop = hw !== null && it.usedPct !== null ? hw - it.usedPct : 0;
 
-    if (raAdvanced || (hw !== null && drop >= RESET_DROP_THRESHOLD && !isTransientStreamDrop(items, i, hw))) {
-      if (!raAdvanced && hw !== null) {
-        lastMidResetAtMs = it.tsMs;
-        lastPreResetHw = hw;
-      }
-      resetSegment(it.usedPct, it.resetAtMs);
-      if (it.kind === "event" && it.ev.apiCostUsd && it.ev.apiCostUsd > 0) {
-        batchByModel.set(it.ev.model, (batchByModel.get(it.ev.model) ?? 0) + it.ev.apiCostUsd);
+    if (raAdvanced) {
+      const boundaryMs = curResetAtMs!;
+      const postResetEvents = batchEvents.filter((ev) => ev.tsMs >= boundaryMs);
+      resetSegment(0, it.resetAtMs);
+      batchEvents = postResetEvents;
+      if (it.kind === "event") batchEvents.push(it.ev);
+      if (it.usedPct !== null && it.usedPct > 0) {
+        if (batchEvents.length > 0) absorbDelta(it.usedPct / 100);
+        hw = it.usedPct;
       }
       continue;
     }
 
-    if (it.kind === "event" && it.ev.apiCostUsd && it.ev.apiCostUsd > 0) {
-      batchByModel.set(it.ev.model, (batchByModel.get(it.ev.model) ?? 0) + it.ev.apiCostUsd);
+    if (hw !== null && drop >= RESET_DROP_THRESHOLD && !isTransientStreamDrop(items, i, hw)) {
+      lastMidResetAtMs = it.tsMs;
+      lastPreResetHw = hw;
+      resetSegment(it.usedPct, it.resetAtMs);
+      if (it.kind === "event") batchEvents.push(it.ev);
+      continue;
     }
+
+    if (it.kind === "event") batchEvents.push(it.ev);
     if (curResetAtMs === null && it.resetAtMs !== null) curResetAtMs = it.resetAtMs;
 
     if (it.usedPct !== null) {
       if (hw === null) {
         hw = it.usedPct;
-        batchByModel = new Map();
+        batchEvents = [];
       } else if (it.usedPct > hw) {
-        const dq = (it.usedPct - hw) / 100;
-        // Skip huge single jumps (> 10%) as they usually indicate an unrecorded gap.
-        if (dq <= 0.1) {
-          chunkDq += dq;
-          for (const [m, usd] of batchByModel) {
-            chunkByModel.set(m, (chunkByModel.get(m) ?? 0) + usd);
-          }
-          if (chunkDq >= 0.045) {
-            chunks.push({ dqWeeks: chunkDq, byModelApiUsd: chunkByModel });
-            chunkDq = 0;
-            chunkByModel = new Map();
-          }
-        } else {
-          chunkDq = 0;
-          chunkByModel = new Map();
-        }
-        batchByModel = new Map();
+        absorbDelta((it.usedPct - hw) / 100);
         hw = it.usedPct;
       }
     }
@@ -592,6 +665,7 @@ export function attributeAccountEvents(
   const out = new Map<string, AttrResult>();
   if (events.length === 0) return out;
 
+  const hasEventHeaders = events.some((e) => e.quotaUsedPct !== null);
   const items = mergeStream(events, samples);
   let hw: number | null = null;
   let curResetAtMs: number | null = null;
@@ -606,13 +680,21 @@ export function attributeAccountEvents(
     return cpw === null ? null : quotaWeeks * cpw;
   };
 
-  const eventWeight = (ev: AttrEvent, useApiCost: boolean): number => {
-    if (useApiCost) {
-      const api = ev.apiCostUsd ?? 0;
-      if (api <= 0) return 0;
-      return api * (opts.weights.multipliers.get(ev.model) ?? 1);
+  const apiWeight = (ev: AttrEvent): number => {
+    const api = ev.apiCostUsd ?? 0;
+    if (api <= 0) return 0;
+    return api * (opts.weights.multipliers.get(ev.model) ?? 1);
+  };
+
+  const batchCanUseApiCost = (evs: readonly AttrEvent[]): boolean => {
+    let anyPriced = false;
+    for (const ev of evs) {
+      const hasTokens = effectiveTokensOf(ev) > 0;
+      const hasPrice = ev.apiCostUsd !== null && ev.apiCostUsd > 0;
+      if (hasTokens && !hasPrice) return false;
+      if (hasPrice) anyPriced = true;
     }
-    return ev.totalTokens > 0 ? ev.totalTokens : 0;
+    return anyPriced;
   };
 
   const distribute = (dqWeeks: number) => {
@@ -622,21 +704,17 @@ export function attributeAccountEvents(
       batch = [];
       return;
     }
-    let useApiCost = false;
+    // Only weight by API list cost when every token-bearing event in the batch has a list
+    // price; mixed or unpriced batches (e.g. Antigravity) use effectiveTokens so unpriced
+    // models still receive their fair share of the observed quota burn.
+    const useApiCost = batchCanUseApiCost(batch);
     let totalW = 0;
     for (const ev of batch) {
-      const w = eventWeight(ev, true);
-      if (w > 0) {
-        useApiCost = true;
-        totalW += w;
-      }
-    }
-    if (!useApiCost) {
-      for (const ev of batch) totalW += eventWeight(ev, false);
+      totalW += useApiCost ? apiWeight(ev) : effectiveTokensOf(ev);
     }
     if (totalW > 0) {
       for (const ev of batch) {
-        const w = eventWeight(ev, useApiCost);
+        const w = useApiCost ? apiWeight(ev) : effectiveTokensOf(ev);
         const q = dqWeeks * (w / totalW);
         out.set(ev.eventId, { quotaWeeks: q, subCostUsd: priceOf(ev.tsMs, q) });
       }
@@ -653,22 +731,33 @@ export function attributeAccountEvents(
     batch = [];
   };
 
+  const estimateBatchQuota = (evs: readonly AttrEvent[]): number => {
+    if (batchCanUseApiCost(evs) && opts.weights.baselineRate > 0) {
+      let sum = 0;
+      for (const ev of evs) sum += apiWeight(ev) * opts.weights.baselineRate;
+      return sum;
+    }
+    if (opts.weights.tokenBaselineRate > 0) {
+      let sum = 0;
+      for (const ev of evs) sum += effectiveTokensOf(ev) * opts.weights.tokenBaselineRate;
+      return sum;
+    }
+    return 0;
+  };
+
   const flushTrailing = () => {
     if (batch.length === 0) return;
     if (hw === null) {
       // No quota observations exist for this account yet; fall back to calibrated plan rate if available.
-      if (opts.weights.baselineRate > 0) {
-        for (const ev of batch) {
-          const w = eventWeight(ev, true);
-          const q = w > 0 ? w * opts.weights.baselineRate : 0;
-          out.set(ev.eventId, { quotaWeeks: q, subCostUsd: priceOf(ev.tsMs, q) });
-        }
+      const est = estimateBatchQuota(batch);
+      if (est > 0) {
+        distribute(est);
       } else {
         for (const ev of batch) {
           out.set(ev.eventId, { quotaWeeks: null, subCostUsd: opts.ignored ? 0 : null });
         }
+        batch = [];
       }
-      batch = [];
       return;
     }
     if (hw >= 100) {
@@ -676,10 +765,10 @@ export function attributeAccountEvents(
       distribute(0);
       return;
     }
-    if (opts.weights.baselineRate > 0) {
-      let estDq = 0;
-      for (const ev of batch) estDq += eventWeight(ev, true) * opts.weights.baselineRate;
-      const cap = Math.min(0.0099, Math.max(0, (100 - hw) / 100));
+    const estDq = estimateBatchQuota(batch);
+    if (estDq > 0) {
+      const maxUnseen = hasEventHeaders ? 0.0099 : 0.05;
+      const cap = Math.min(maxUnseen, Math.max(0, (100 - hw) / 100));
       distribute(Math.min(estDq, cap));
     } else {
       distribute(0);
@@ -704,12 +793,33 @@ export function attributeAccountEvents(
     const raAdvanced = curResetAtMs !== null && it.resetAtMs !== null && it.resetAtMs > curResetAtMs + RESET_MERGE_MS;
     const drop = hw !== null && it.usedPct !== null ? hw - it.usedPct : 0;
 
-    if (raAdvanced || (hw !== null && drop >= RESET_DROP_THRESHOLD && !isTransientStreamDrop(items, i, hw))) {
+    if (raAdvanced) {
+      // A scheduled weekly reset always refills the new window to 0%. Split any
+      // buffered events around the old reset boundary so headerless events that
+      // arrived in the new window (e.g. Antigravity between polls) receive the
+      // new window's initial nonzero utilization.
+      const boundaryMs = curResetAtMs!;
+      const preReset = batch.filter((ev) => ev.tsMs < boundaryMs);
+      const postReset = batch.filter((ev) => ev.tsMs >= boundaryMs);
+      batch = preReset;
       flushTrailing();
-      if (!raAdvanced && hw !== null) {
-        lastMidResetAtMs = it.tsMs;
-        lastPreResetHw = hw;
+      batch = postReset;
+      hw = 0;
+      curResetAtMs = it.resetAtMs;
+      if (it.kind === "event") batch.push(it.ev);
+      if (it.usedPct !== null && it.usedPct > 0) {
+        if (batch.length > 0) distribute(it.usedPct / 100);
+        hw = it.usedPct;
       }
+      continue;
+    }
+
+    if (hw !== null && drop >= RESET_DROP_THRESHOLD && !isTransientStreamDrop(items, i, hw)) {
+      // Mid-window reset (e.g. full reset or partial Fable giveback): the new floor
+      // is the post-reset utilization, not 0%, so remaining non-reset usage is not re-billed.
+      flushTrailing();
+      lastMidResetAtMs = it.tsMs;
+      lastPreResetHw = hw;
       hw = it.usedPct;
       if (it.resetAtMs !== null) curResetAtMs = it.resetAtMs;
       if (it.kind === "event") batch.push(it.ev);
@@ -847,7 +957,7 @@ export interface SubscriptionRow {
   provider: string;
   source: string;
   plan: string | null;
-  monthly_cost_usd: number;
+  monthly_cost_usd: number | null;
   billing_day: number | null;
   ignored: boolean;
   note: string | null;
@@ -901,6 +1011,7 @@ export async function recomputeSubscriptionCosts(sql: Db): Promise<RecomputeResu
       order by provider, source, ts`,
     sql<Record<string, unknown>[]>`
       select event_id, provider, source, ts, model, api_cost_usd, total_tokens::float8 as total_tokens,
+             (input_tokens + 0.1 * cache_read_tokens + 1.25 * cache_write_tokens + 5.0 * output_tokens + unclassified_tokens)::float8 as eff_tokens,
              failed, quota_used_pct, quota_reset_at, quota_weeks, sub_cost_usd
       from events_v
       where source is not null
@@ -915,7 +1026,7 @@ export async function recomputeSubscriptionCosts(sql: Db): Promise<RecomputeResu
       provider,
       source,
       plan: r.plan ? String(r.plan) : null,
-      monthly_cost_usd: num(r.monthly_cost_usd),
+      monthly_cost_usd: numOrNull(r.monthly_cost_usd),
       billing_day: r.billing_day === null || r.billing_day === undefined ? null : num(r.billing_day),
       ignored: r.ignored === true,
       note: r.note ? String(r.note) : null,
@@ -933,9 +1044,9 @@ export async function recomputeSubscriptionCosts(sql: Db): Promise<RecomputeResu
     const plan = r.plan ? String(r.plan).toLowerCase() : null;
     if (plan && (plan !== "max" || !planByAccount.has(key))) planByAccount.set(key, plan);
     list.push({
-      tsMs: new Date(String(r.ts)).getTime(),
+      tsMs: toMs(r.ts),
       usedPct: num(r.used_pct),
-      resetAtMs: r.reset_at ? new Date(String(r.reset_at)).getTime() : null,
+      resetAtMs: toMsOrNull(r.reset_at),
       plan,
     });
   }
@@ -958,13 +1069,14 @@ export async function recomputeSubscriptionCosts(sql: Db): Promise<RecomputeResu
       eventId: String(r.event_id),
       provider,
       source,
-      tsMs: new Date(String(r.ts)).getTime(),
+      tsMs: toMs(r.ts),
       model: String(r.model),
       apiCostUsd: numOrNull(r.api_cost_usd),
       totalTokens: num(r.total_tokens),
+      effectiveTokens: num(r.eff_tokens),
       failed: r.failed === true,
       quotaUsedPct: numOrNull(r.quota_used_pct),
-      quotaResetAtMs: r.quota_reset_at ? new Date(String(r.quota_reset_at)).getTime() : null,
+      quotaResetAtMs: toMsOrNull(r.quota_reset_at),
       prevQuotaWeeks: numOrNull(r.quota_weeks),
       prevSubCostUsd: numOrNull(r.sub_cost_usd),
     });
@@ -1047,7 +1159,7 @@ export async function recomputeSubscriptionCosts(sql: Db): Promise<RecomputeResu
     };
 
     const group = planGroupOf(key, provider);
-    const weights = weightsByGroup.get(group) ?? { baselineRate: 0, multipliers: new Map() };
+    const weights = weightsByGroup.get(group) ?? { baselineRate: 0, tokenBaselineRate: 0, multipliers: new Map() };
 
     const attributed = attributeAccountEvents(evs, samples, { weights, costPerWeekAt, ignored });
 
@@ -1090,7 +1202,7 @@ export async function upsertSubscription(
   input: {
     provider: string;
     source: string;
-    monthlyCostUsd: number;
+    monthlyCostUsd: number | null;
     billingDay?: number | null;
     plan?: string | null;
     ignored?: boolean;
@@ -1101,7 +1213,7 @@ export async function upsertSubscription(
   const source = input.source.trim();
   if (!provider) throw new Error("provider is required");
   if (!source) throw new Error("account is required");
-  if (!Number.isFinite(input.monthlyCostUsd) || input.monthlyCostUsd < 0) {
+  if (input.monthlyCostUsd !== null && (!Number.isFinite(input.monthlyCostUsd) || input.monthlyCostUsd < 0)) {
     throw new Error("monthly cost must be a non-negative number");
   }
   const billingDay = input.billingDay ?? null;
@@ -1117,7 +1229,7 @@ export async function upsertSubscription(
     values (${provider}, ${source}, ${plan}, ${input.monthlyCostUsd}, ${billingDay}, ${ignored}, ${note}, now())
     on conflict (provider, source) do update set
       plan = coalesce(excluded.plan, subscriptions.plan),
-      monthly_cost_usd = excluded.monthly_cost_usd,
+      monthly_cost_usd = coalesce(excluded.monthly_cost_usd, subscriptions.monthly_cost_usd),
       billing_day = coalesce(excluded.billing_day, subscriptions.billing_day),
       ignored = excluded.ignored,
       note = coalesce(excluded.note, subscriptions.note),
@@ -1128,7 +1240,7 @@ export async function upsertSubscription(
     provider: String(row!.provider),
     source: String(row!.source),
     plan: row!.plan ? String(row!.plan) : null,
-    monthly_cost_usd: num(row!.monthly_cost_usd),
+    monthly_cost_usd: numOrNull(row!.monthly_cost_usd),
     billing_day: row!.billing_day === null ? null : num(row!.billing_day),
     ignored: row!.ignored === true,
     note: row!.note ? String(row!.note) : null,
@@ -1156,17 +1268,14 @@ export async function setSubscriptionIgnored(
       provider: String(row!.provider),
       source: String(row!.source),
       plan: row!.plan ? String(row!.plan) : null,
-      monthly_cost_usd: num(row!.monthly_cost_usd),
+      monthly_cost_usd: numOrNull(row!.monthly_cost_usd),
       billing_day: row!.billing_day === null ? null : num(row!.billing_day),
       ignored: row!.ignored === true,
       note: row!.note ? String(row!.note) : null,
     };
   }
-  const [sample] = await sql<{ plan: string | null }[]>`
-    select plan from quota_samples where provider = ${p} and source = ${s} and plan is not null order by ts desc limit 1`;
-  const plan = sample?.plan ?? null;
-  const cost = defaultPlanMonthlyCost(p, plan) ?? 0;
-  return await upsertSubscription(sql, { provider: p, source: s, monthlyCostUsd: cost, plan, ignored });
+  // Leave monthly_cost_usd null so unignoring later automatically resolves the discovered plan default.
+  return await upsertSubscription(sql, { provider: p, source: s, monthlyCostUsd: null, ignored });
 }
 
 export async function deleteSubscription(sql: Db, provider: string, source: string): Promise<boolean> {
@@ -1198,7 +1307,7 @@ export async function listSubscriptions(sql: Db, nowMs = Date.now()): Promise<Ac
       group by 1, 2`,
   ]);
 
-  const subs = new Map<string, { provider: string; source: string; plan: string | null; cost: number; billingDay: number | null; ignored: boolean }>();
+  const subs = new Map<string, { provider: string; source: string; plan: string | null; cost: number | null; billingDay: number | null; ignored: boolean }>();
   const allKeys = new Map<string, { provider: string; source: string }>();
 
   for (const r of subRows) {
@@ -1209,7 +1318,7 @@ export async function listSubscriptions(sql: Db, nowMs = Date.now()): Promise<Ac
       provider,
       source,
       plan: r.plan ? String(r.plan) : null,
-      cost: num(r.monthly_cost_usd),
+      cost: numOrNull(r.monthly_cost_usd),
       billingDay: r.billing_day === null ? null : num(r.billing_day),
       ignored: r.ignored === true,
     });
@@ -1225,9 +1334,9 @@ export async function listSubscriptions(sql: Db, nowMs = Date.now()): Promise<Ac
     let list = samplesByAccount.get(key);
     if (!list) samplesByAccount.set(key, (list = []));
     list.push({
-      tsMs: new Date(String(r.ts)).getTime(),
+      tsMs: toMs(r.ts),
       usedPct: num(r.used_pct),
-      resetAtMs: r.reset_at ? new Date(String(r.reset_at)).getTime() : null,
+      resetAtMs: toMsOrNull(r.reset_at),
       plan: r.plan ? String(r.plan) : null,
     });
   }
@@ -1264,7 +1373,11 @@ export async function listSubscriptions(sql: Db, nowMs = Date.now()): Promise<Ac
     if (!currentCycle) {
       const cycle = billingCycleFor(nowMs, billingDay);
       const plan = sub?.plan ?? resolvePlanTimeline(samples, null);
-      const monthly = sub?.ignored ? 0 : (sub ? sub.cost : defaultPlanMonthlyCost(provider, plan));
+      const monthly = sub?.ignored
+        ? 0
+        : sub?.cost !== null && sub?.cost !== undefined
+          ? sub.cost
+          : defaultPlanMonthlyCost(provider, plan);
       currentCycle = {
         cycle,
         plan,

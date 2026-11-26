@@ -195,7 +195,7 @@ export async function buildBoard(
             (b.today - make_interval(days => $2::int)) at time zone $1 as since,
             (b.today - make_interval(days => 2 * $2::int + 1)) at time zone $1 as prev_since,
             (select max(ts) from events) as last_event_at,
-            (exists (select 1 from subscriptions where not ignored)
+            (exists (select 1 from subscriptions where not ignored and monthly_cost_usd is not null)
              or exists (select 1 from events where sub_cost_usd is not null)) as has_sub
      from (select date_trunc('day', now() at time zone $1) as today) b`,
     [tz, days],

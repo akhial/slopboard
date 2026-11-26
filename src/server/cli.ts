@@ -337,7 +337,7 @@ async function run(argv: string[]): Promise<number> {
         });
         const res = await recomputeSubscriptionCosts(sql);
         out(
-          `Saved ${sub.provider} ${sub.source}: $${sub.monthly_cost_usd.toFixed(2)}/mo` +
+          `Saved ${sub.provider} ${sub.source}: $${(sub.monthly_cost_usd ?? 0).toFixed(2)}/mo` +
             (sub.billing_day ? `, billing day ${sub.billing_day}` : "") +
             `. Recomputed ${res.eventsUpdated} event(s).`,
         );
@@ -354,7 +354,8 @@ async function run(argv: string[]): Promise<number> {
         needArgs(args, 2, "subscriptions unignore <provider> <account>");
         const sub = await setSubscriptionIgnored(sql, args[0]!, args[1]!, false);
         const res = await recomputeSubscriptionCosts(sql);
-        out(`Included ${sub.provider} ${sub.source} ($${sub.monthly_cost_usd.toFixed(2)}/mo). Recomputed ${res.eventsUpdated} event(s).`);
+        const label = sub.monthly_cost_usd !== null ? `$${sub.monthly_cost_usd.toFixed(2)}/mo` : "auto plan default";
+        out(`Included ${sub.provider} ${sub.source} (${label}). Recomputed ${res.eventsUpdated} event(s).`);
         return 0;
       }
       case "subscriptions delete": {
