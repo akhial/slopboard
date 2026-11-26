@@ -2,7 +2,7 @@
 // everyone who has a key but has not used it in this range.
 
 import type { ReactNode } from "react";
-import type { Board, PersonRow } from "../shared/api.ts";
+import type { Board, CostMode, PersonRow } from "../shared/api.ts";
 import { dealOut } from "./colors.ts";
 import { rangeInfo } from "./data.ts";
 import { clockFor, compact, full, hourLabel, pct, usd } from "./format.ts";
@@ -21,21 +21,37 @@ function Chip() {
   );
 }
 
-/** Null means "tokens, but no list price for any of them". No tokens at all is a plain $0. */
-function Cost({ person }: { person: PersonRow }) {
+/** Null means "tokens, but none could be priced in this mode". No tokens at all is a plain $0. */
+function Cost({ person, mode }: { person: PersonRow; mode: CostMode }) {
   if (person.costUsd === null && person.tokens.total > 0) {
     return (
-      <span className="unpriced" title="No public API list price known for these models — not the same as free.">
+      <span
+        className="unpriced"
+        title={
+          mode === "subscription"
+            ? "No subscription quota data for these models — not the same as free."
+            : "No public API list price known for these models — not the same as free."
+        }
+      >
         unpriced
       </span>
     );
   }
-  return <Num value={person.costUsd ?? 0} format={usd} />;
+  const title =
+    mode === "subscription" && person.listCostUsd !== null && person.listCostUsd > 0
+      ? `Actual subscription spend (${usd(person.listCostUsd)} at public API list rates)`
+      : undefined;
+  return (
+    <span title={title}>
+      <Num value={person.costUsd ?? 0} format={usd} />
+    </span>
+  );
 }
 
 /** The leader, as a loud bank card on a scrap of torn paper. */
 function LeaderCard({ person, board }: { person: PersonRow; board: Board }) {
   const info = rangeInfo(board.range);
+  const costLabel = board.costMode === "subscription" ? "spent" : "fake bill";
   return (
     <article className="leader-card" aria-label={`Place 1: ${person.name}`}>
       <StickyNote className="leader-note">
@@ -51,7 +67,7 @@ function LeaderCard({ person, board }: { person: PersonRow; board: Board }) {
           <Num value={person.tokens.total} /> tokens
         </span>
         <span>
-          <Cost person={person} /> fake bill · {compact(person.subagents)} interns · {person.streakDays}d streak
+          <Cost person={person} mode={board.costMode} /> {costLabel} · {compact(person.subagents)} interns · {person.streakDays}d streak
         </span>
       </p>
       <p className="leader-rank">
@@ -190,10 +206,13 @@ function Row({ person, place, board }: { person: PersonRow; place: number | null
         </p>
       </div>
       <div className="c-stat c-cost">
-        <span className="label">Fake bill</span>
+        <span className="label">{board.costMode === "subscription" ? "Real spend" : "Fake bill"}</span>
         <b>
-          <Cost person={person} />
+          <Cost person={person} mode={board.costMode} />
         </b>
+        {board.costMode === "subscription" && person.listCostUsd !== null && person.listCostUsd > 0 ? (
+          <small title="What these tokens would cost at public API list rates">{usd(person.listCostUsd)} list</small>
+        ) : null}
       </div>
       <div className="c-stat">
         <span className="label">Threads</span>
@@ -330,7 +349,15 @@ export function Standings({ board }: { board: Board }) {
           <span>#</span>
           <span>Suspect</span>
           <span>Tokens</span>
-          <span title="What these tokens would cost at public API list prices. Nobody is billed this.">Fake bill</span>
+          <span
+            title={
+              board.costMode === "subscription"
+                ? "Actual subscription spend, calculated from each account's billing cycle, resets, and measured quota burn."
+                : "What these tokens would cost at public API list prices. Nobody is billed this."
+            }
+          >
+            {board.costMode === "subscription" ? "Real spend" : "Fake bill"}
+          </span>
           <span>Threads</span>
           <span>Subagents</span>
           <span>Cache hits</span>

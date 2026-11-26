@@ -48,6 +48,10 @@ export interface EventRow {
   ttft_ms: number | null;
   client_ip: string | null;
   user_agent: string | null;
+  quota_used_pct: number | null;
+  quota_reset_at: string | null;
+  quota_weeks: number | null;
+  sub_cost_usd: number | null;
   raw: Record<string, unknown>;
 }
 
@@ -203,6 +207,68 @@ export function redactCredentials(text: string): string {
 }
 
 const MAX_FAIL_BODY = 8000;
+const WEEK_MINUTES = 7 * 24 * 60;
+
+function headerValue(headers: Json, targetLower: string): string | null {
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() !== targetLower) continue;
+    const raw = Array.isArray(v) ? v[0] : v;
+    if (typeof raw === "string") {
+      const trimmed = raw.trim();
+      if (trimmed) return trimmed;
+    } else if (typeof raw === "number" && Number.isFinite(raw)) {
+      return String(raw);
+    }
+  }
+  return null;
+}
+
+function parseFiniteFloat(raw: string | null): number | null {
+  if (!raw) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseUnixReset(raw: string | null): string | null {
+  const n = parseFiniteFloat(raw);
+  if (n === null || n <= 0) return null;
+  const ms = n < 1e11 ? Math.round(n * 1000) : Math.round(n);
+  const d = new Date(ms);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+/**
+ * Extracts the weekly plan-quota observation from upstream response headers.
+ * Mirrors CLIProxyAPI's quota_history_parse.go for Claude and Codex.
+ */
+export function extractQuotaHeader(
+  provider: string,
+  headers: unknown,
+): { usedPct: number | null; resetAt: string | null } {
+  if (!isObject(headers)) return { usedPct: null, resetAt: null };
+  const p = provider.toLowerCase();
+  if (p === "claude") {
+    const frac = parseFiniteFloat(headerValue(headers, "anthropic-ratelimit-unified-7d-utilization"));
+    if (frac === null || frac < 0) return { usedPct: null, resetAt: null };
+    return {
+      usedPct: Math.min(100, Math.max(0, Math.round(frac * 10000) / 100)),
+      resetAt: parseUnixReset(headerValue(headers, "anthropic-ratelimit-unified-7d-reset")),
+    };
+  }
+  if (p === "codex") {
+    const activeLimit = (headerValue(headers, "x-codex-active-limit") ?? "").toLowerCase();
+    if (activeLimit.startsWith("imagegen")) return { usedPct: null, resetAt: null };
+    const winMinutes = parseFiniteFloat(headerValue(headers, "x-codex-primary-window-minutes"));
+    if (winMinutes !== WEEK_MINUTES) return { usedPct: null, resetAt: null };
+    const pct = parseFiniteFloat(headerValue(headers, "x-codex-primary-used-percent"));
+    if (pct === null || pct < 0) return { usedPct: null, resetAt: null };
+    return {
+      usedPct: Math.min(100, Math.max(0, Math.round(pct * 100) / 100)),
+      resetAt: parseUnixReset(headerValue(headers, "x-codex-primary-reset-at")),
+    };
+  }
+  return { usedPct: null, resetAt: null };
+}
 
 /** Returns null for anything that is not a usage record. */
 export function normalizeRecord(input: unknown): EventRow | null {
@@ -262,6 +328,9 @@ export function normalizeRecord(input: unknown): EventRow | null {
   const tokens = tokensOf(record);
   const statusCode = count(fail.status_code);
 
+  const provider = text(record.provider) || "unknown";
+  const quota = extractQuotaHeader(provider, raw.response_headers);
+
   return {
     event_id: eventId,
     ts: timestamp(record.timestamp),
@@ -276,7 +345,7 @@ export function normalizeRecord(input: unknown): EventRow | null {
     is_fork: isFork,
     is_compaction: isCompaction,
     node_kind: nodeKind || null,
-    provider: text(record.provider) || "unknown",
+    provider,
     executor_type: textOrNull(record.executor_type),
     model,
     alias,
@@ -306,6 +375,10 @@ export function normalizeRecord(input: unknown): EventRow | null {
     ttft_ms: record.ttft_ms === undefined ? null : count(record.ttft_ms),
     client_ip: textOrNull(record.resolved_client_ip) ?? textOrNull(record.client_ip),
     user_agent: textOrNull(record.user_agent),
+    quota_used_pct: quota.usedPct,
+    quota_reset_at: quota.resetAt,
+    quota_weeks: null,
+    sub_cost_usd: null,
     raw,
   };
 }

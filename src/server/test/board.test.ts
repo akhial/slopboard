@@ -352,6 +352,7 @@ describe("awards", () => {
       failedRequests: 0,
       tokens: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0, total: 0 },
       costUsd: null,
+      listCostUsd: null,
       threads: 1,
       subagents: 0,
       subagentTokenShare: 0,

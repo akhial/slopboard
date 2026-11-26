@@ -103,7 +103,7 @@ function BoardView({ board, switching }: { board: Board; switching: boolean }) {
             <Guard>
               <Heatmap board={board} />
             </Guard>
-            <PretendBill />
+            <PretendBill board={board} />
           </div>
         </>
       )}

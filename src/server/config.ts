@@ -22,6 +22,8 @@ export interface Config {
   boardCacheMs: number;
   pricesUrl: string;
   pricesRefreshHours: number;
+  /** Seconds between quota-history syncs and subscription cost recomputations. */
+  subscriptionSyncSeconds: number;
   sqlTimeoutMs: number;
   sqlMaxRows: number;
   /** Size budget of one POST /api/sql result. */
@@ -82,6 +84,7 @@ export function loadConfig(env: Env = process.env): Config {
     boardCacheMs: int(env, "BOARD_CACHE_MS", 5000, 0),
     pricesUrl: env.PRICES_URL?.trim() || DEFAULT_PRICES_URL,
     pricesRefreshHours: int(env, "PRICES_REFRESH_HOURS", 24, 1),
+    subscriptionSyncSeconds: int(env, "SUBSCRIPTION_SYNC_SECONDS", 300, 10),
     sqlTimeoutMs: int(env, "SQL_TIMEOUT_MS", 5000, 100),
     sqlMaxRows: int(env, "SQL_MAX_ROWS", 1000, 1),
     sqlMaxBytes: int(env, "SQL_MAX_BYTES", 4_000_000, 1000),

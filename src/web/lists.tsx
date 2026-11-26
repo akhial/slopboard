@@ -12,10 +12,20 @@ export function Models({ board }: { board: Board }) {
   const info = rangeInfo(board.range);
   const max = Math.max(1, ...board.models.map((m) => m.tokens.total));
   const sum = board.models.reduce((s, m) => s + m.tokens.total, 0);
+  const isSub = board.costMode === "subscription";
   return (
     <section className="models panel has-art" aria-labelledby="models-title">
       <Cutout name="cloche" className="panel-art" />
-      <SectionHead id="models-title" title="On the" mark="menu" note={`What everyone ordered ${info.phrase}. Prices are public API list rates — nobody's card was charged.`} />
+      <SectionHead
+        id="models-title"
+        title="On the"
+        mark="menu"
+        note={
+          isSub
+            ? `What everyone ordered ${info.phrase}. Prices are actual subscription spend — hover for public API list rates.`
+            : `What everyone ordered ${info.phrase}. Prices are public API list rates — nobody's card was charged.`
+        }
+      />
       {board.models.length === 0 ? (
         <p className="panel-empty">Kitchen's closed. Nothing ordered yet.</p>
       ) : (
@@ -26,11 +36,27 @@ export function Models({ board }: { board: Board }) {
                 <h3>{m.displayName}</h3>
                 <span className="dish-dots" aria-hidden="true" />
                 {m.priced && m.costUsd !== null ? (
-                  <b className="dish-price" title="Public API list value (not billed)">
+                  <b
+                    className="dish-price"
+                    title={
+                      isSub
+                        ? m.listCostUsd !== null
+                          ? `Actual subscription spend (${usd(m.listCostUsd)} at public API list rates)`
+                          : "Actual subscription spend"
+                        : "Public API list value (not billed)"
+                    }
+                  >
                     {usd(m.costUsd)}
                   </b>
                 ) : (
-                  <b className="dish-price unpriced" title="No public list price known for this model — not the same as free.">
+                  <b
+                    className="dish-price unpriced"
+                    title={
+                      isSub
+                        ? "No subscription quota data for this model — not the same as free."
+                        : "No public list price known for this model — not the same as free."
+                    }
+                  >
                     unpriced
                   </b>
                 )}

@@ -1,8 +1,37 @@
-// Client for the two parts of the proxy's management API that Slopboard uses.
+// Client for the parts of the proxy's management API that Slopboard uses.
 // Routes: CLIProxyAPI internal/api/server_management_v8.go.
 
 const QUEUE_PATH = "/v8/management/observability/usage/queue";
 const API_KEYS_PATH = "/v8/management/config/access/api-keys";
+const QUOTA_HISTORY_PATH = "/v8/management/quota/history";
+
+export interface QuotaHistoryWindowSeries {
+  id: string;
+  period_seconds: number;
+  /** [t_ms, used_percent, reset_at_ms | null] */
+  points: [number, number, number | null][];
+  dropped_at?: number;
+}
+
+export interface QuotaHistoryAccount {
+  auth_id: string;
+  auth_index: string;
+  file_name: string;
+  provider: string;
+  label: string;
+  email: string;
+  plan: string;
+  /** [t_ms, plan] oldest first */
+  plans?: [number, string][];
+  windows: QuotaHistoryWindowSeries[];
+}
+
+export interface QuotaHistoryResponse {
+  enabled: boolean;
+  now: number;
+  poll_interval_seconds: number;
+  accounts: QuotaHistoryAccount[];
+}
 
 export class ProxyError extends Error {
   constructor(
@@ -78,6 +107,33 @@ export class ProxyClient {
     }
     if (!Array.isArray(body)) throw new ProxyError("usage queue: response is not an array", res.status);
     return body;
+  }
+
+  /**
+   * Reads recorded quota history (used % and reset timestamps per credential)
+   * from the proxy. Returns enabled=false when the proxy does not support or
+   * has disabled quota history.
+   */
+  async getQuotaHistory(fromMs?: number, toMs?: number): Promise<QuotaHistoryResponse> {
+    const params = new URLSearchParams();
+    if (fromMs !== undefined) params.set("from", String(Math.floor(fromMs)));
+    if (toMs !== undefined) params.set("to", String(Math.floor(toMs)));
+    const qs = params.toString();
+    const res = await this.request(qs ? `${QUOTA_HISTORY_PATH}?${qs}` : QUOTA_HISTORY_PATH);
+    if (res.status === 404) {
+      return { enabled: false, now: Date.now(), poll_interval_seconds: 0, accounts: [] };
+    }
+    if (!res.ok) await ProxyClient.fail(res, "quota history");
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch (error) {
+      throw new ProxyError(`quota history: unreadable response: ${(error as Error).message}`, res.status);
+    }
+    if (typeof body !== "object" || body === null || !Array.isArray((body as { accounts?: unknown }).accounts)) {
+      throw new ProxyError("quota history: unexpected response shape", res.status);
+    }
+    return body as QuotaHistoryResponse;
   }
 
   /** The client API keys the proxy accepts. */

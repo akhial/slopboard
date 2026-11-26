@@ -1,7 +1,7 @@
 // Awards (one winner each, per-person superlatives) and records (single
 // record-setting things). The wording lives here, not in the UI.
 
-import type { Award, PersonRow, RecordCard } from "../shared/api.ts";
+import type { Award, CostMode, PersonRow, RecordCard } from "../shared/api.ts";
 import { num, numOrNull } from "./db.ts";
 import { fmtCount, fmtDay, fmtDuration, fmtPct, fmtUsd, fmtWhen, plural } from "./format.ts";
 
@@ -186,7 +186,7 @@ export const AWARDS: readonly AwardDef[] = [
 ];
 
 /** Every award, in a fixed order, with nobody as winner where nobody qualifies. */
-export function buildAwards(stats: PersonStats[], threadRows: Row[]): Award[] {
+export function buildAwards(stats: PersonStats[], threadRows: Row[], costMode: CostMode = "list"): Award[] {
   const biggestThread = new Map<string, number>();
   for (const t of threadRows) {
     if (num(t.rn_tokens) === 1) biggestThread.set(String(t.person_id), num(t.tokens));
@@ -196,18 +196,24 @@ export function buildAwards(stats: PersonStats[], threadRows: Row[]): Award[] {
   const eligible = stats.filter((s) => !s.person.unassigned);
 
   return AWARDS.map((def) => {
+    const isSubSpend = costMode === "subscription" && def.id === "series-a-burn-rate";
+    const min = isSubSpend ? 1 : def.min;
+    const blurb = isSubSpend
+      ? "Burned the biggest share of the team's subscription budget. Single-handedly justifying the next tier upgrade."
+      : def.blurb;
+    const format = isSubSpend ? (n: number) => `${fmtUsd(n)} real spend` : def.format;
     const ranked = eligible
       .map((s) => ({ id: s.person.id, score: def.score(s, extra) }))
-      .filter((c): c is { id: string; score: number } => c.score !== null && Number.isFinite(c.score) && c.score >= def.min)
+      .filter((c): c is { id: string; score: number } => c.score !== null && Number.isFinite(c.score) && c.score >= min)
       .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
     const winner = ranked[0];
     return {
       id: def.id,
       title: def.title,
       emoji: def.emoji,
-      blurb: def.blurb,
+      blurb,
       winnerId: winner?.id ?? null,
-      value: winner ? def.format(winner.score) : null,
+      value: winner ? format(winner.score) : null,
       runnerUpId: ranked[1]?.id ?? null,
     };
   });

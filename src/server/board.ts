@@ -3,6 +3,7 @@
 import type {
   Board,
   BoardTotals,
+  CostMode,
   HeatCell,
   LiveEvent,
   ModelRow,
@@ -193,13 +194,17 @@ export async function buildBoard(
     `select now() as now,
             (b.today - make_interval(days => $2::int)) at time zone $1 as since,
             (b.today - make_interval(days => 2 * $2::int + 1)) at time zone $1 as prev_since,
-            (select max(ts) from events) as last_event_at
+            (select max(ts) from events) as last_event_at,
+            (exists (select 1 from subscriptions where not ignored)
+             or exists (select 1 from events where sub_cost_usd is not null)) as has_sub
      from (select date_trunc('day', now() at time zone $1) as today) b`,
     [tz, days],
   );
   const now = date(bounds?.now) ?? new Date();
   const rangeStart = range === "all" ? null : date(bounds?.since);
   const prevStart = range === "all" ? null : date(bounds?.prev_since);
+  const costMode: CostMode = bounds?.has_sub === true ? "subscription" : "list";
+  const costCol = costMode === "subscription" ? "sub_cost_usd" : "api_cost_usd";
   // "all" is spelled as "since the epoch" so every query has the same shape.
   const since = rangeStart ?? new Date(0);
   const unit: Timeline["unit"] = range === "today" ? "hour" : "day";
@@ -246,7 +251,8 @@ export async function buildBoard(
               ${REQUESTS}::int as requests,
               ${FAILED_REQUESTS}::int as failed_requests,
               ${TOKEN_SUMS},
-              sum(cost_usd)::float8 as cost,
+              sum(${costCol})::float8 as cost,
+              sum(api_cost_usd)::float8 as list_cost,
               count(distinct thread_id)::int as threads,
               count(distinct session_id) filter (where is_subagent)::int as subagents,
               coalesce(sum(total_tokens) filter (where is_subagent), 0)::float8 as subagent_tokens,
@@ -269,7 +275,8 @@ export async function buildBoard(
       `select ${REQUESTS}::int as requests,
               ${FAILED_REQUESTS}::int as failed_requests,
               ${TOKEN_SUMS},
-              sum(cost_usd)::float8 as cost,
+              sum(${costCol})::float8 as cost,
+              sum(api_cost_usd)::float8 as list_cost,
               count(distinct thread_id)::int as threads,
               count(distinct session_id) filter (where is_subagent)::int as subagents
        from events_v
@@ -303,8 +310,10 @@ export async function buildBoard(
               mode() within group (order by provider) as provider,
               ${REQUESTS}::int as requests,
               ${TOKEN_SUMS},
-              sum(cost_usd)::float8 as cost,
-              bool_or(price_source is not null) as priced
+              sum(${costCol})::float8 as cost,
+              sum(api_cost_usd)::float8 as list_cost,
+              ${costMode === "subscription" ? "bool_or(sub_cost_usd is not null)" : "bool_or(price_source is not null)"} as priced,
+              bool_or(price_source is not null) as list_priced
        from events_v
        where ts >= $1
        group by requested_model`,
@@ -312,7 +321,7 @@ export async function buildBoard(
     ),
     query(
       sql,
-      `select ts, person_id, requested_model as model, total_tokens::float8 as tokens, cost_usd, is_subagent, failed
+      `select ts, person_id, requested_model as model, total_tokens::float8 as tokens, ${costCol} as cost_usd, is_subagent, failed
        from events_v order by ts desc limit 30`,
     ),
     query(
@@ -365,9 +374,9 @@ export async function buildBoard(
     ),
     query(
       sql,
-      `select ts, person_id, requested_model as model, total_tokens::float8 as tokens, cost_usd
-       from events_v where ts >= $1 and cost_usd > 0
-       order by cost_usd desc, ts limit 1`,
+      `select ts, person_id, requested_model as model, total_tokens::float8 as tokens, ${costCol} as cost_usd
+       from events_v where ts >= $1 and ${costCol} > 0
+       order by ${costCol} desc, ts limit 1`,
       [since],
     ),
     query(
@@ -476,6 +485,7 @@ export async function buildBoard(
       failedRequests: num(row?.failed_requests),
       tokens,
       costUsd: costOf(tokens, row?.cost),
+      listCostUsd: costOf(tokens, row?.list_cost),
       threads: num(row?.threads),
       subagents: num(row?.subagents),
       subagentTokenShare: ratio(num(row?.subagent_tokens), tokens.total),
@@ -521,6 +531,7 @@ export async function buildBoard(
     .map((r) => {
       const model = String(r.model);
       const priced = r.priced === true;
+      const listPriced = r.list_priced === true;
       return {
         model,
         displayName: displayModelName(model),
@@ -528,6 +539,7 @@ export async function buildBoard(
         requests: num(r.requests),
         tokens: tokenCounts(r),
         costUsd: priced ? numOrNull(r.cost) : null,
+        listCostUsd: listPriced ? numOrNull(r.list_cost) : null,
         priced,
         topPersonId: topPerson.get(model)?.id ?? null,
       };
@@ -536,11 +548,13 @@ export async function buildBoard(
 
   // ---- totals
   const totalRow = totalRows[0];
+  const totalTokens = tokenCounts(totalRow);
   const totals: BoardTotals = {
     requests: num(totalRow?.requests),
     failedRequests: num(totalRow?.failed_requests),
-    tokens: tokenCounts(totalRow),
-    costUsd: costOf(tokenCounts(totalRow), totalRow?.cost),
+    tokens: totalTokens,
+    costUsd: costOf(totalTokens, totalRow?.cost),
+    listCostUsd: costOf(totalTokens, totalRow?.list_cost),
     threads: num(totalRow?.threads),
     subagents: num(totalRow?.subagents),
     people: people.filter((p) => !p.unassigned && p.requests > 0).length,
@@ -575,6 +589,7 @@ export async function buildBoard(
     range,
     rangeStart: rangeStart?.toISOString() ?? null,
     timezone: tz,
+    costMode,
     lastEventAt: iso(bounds?.last_event_at),
     collectorLagSeconds,
     totals,
@@ -582,7 +597,7 @@ export async function buildBoard(
     models,
     timeline,
     heatmap: slow.heatmap,
-    awards: buildAwards(stats, threadRows),
+    awards: buildAwards(stats, threadRows, costMode),
     records: buildRecords(recordInputs),
     recent,
   };
