@@ -20,6 +20,14 @@ import {
 } from "./keys.ts";
 import { refreshPrices } from "./prices.ts";
 import { ProxyClient, ProxyError } from "./proxy.ts";
+import {
+  deleteSubscription,
+  listSubscriptions,
+  recomputeSubscriptionCosts,
+  setSubscriptionIgnored,
+  syncQuotaHistory,
+  upsertSubscription,
+} from "./subscriptions.ts";
 
 const USAGE = `slopboard admin
 
@@ -39,6 +47,17 @@ const USAGE = `slopboard admin
   prices status              Show each model seen and where its price comes from.
   prices alias <model> <id>  Price <model> like LiteLLM's <id>.
   prices unset <model>       Remove a manual alias or price.
+  subscriptions list         Show every upstream subscription account, cycle rate and real spend.
+  subscriptions set <provider> <account> --cost <usd> [--billing-day <1-31>] [--plan <plan>] [--note <text>]
+                             Set monthly cost and billing day for an account, then recompute.
+  subscriptions ignore <provider> <account>
+                             Exclude an account from real spend ($0) and recompute.
+  subscriptions unignore <provider> <account>
+                             Include an ignored account in real spend again and recompute.
+  subscriptions delete <provider> <account>
+                             Remove an explicit subscription entry (falls back to plan defaults).
+  subscriptions sync         Pull quota history from the proxy and recompute real spend now.
+  subscriptions recompute    Recompute real spend from stored quota history and events.
 
 revoke and drop refuse to remove the proxy's last key. --force overrides that,
 and leaves the proxy accepting every request without a key.
@@ -81,9 +100,36 @@ function needArgs(args: string[], n: number, usage: string): void {
   if (args.length !== n) throw new UsageError(`usage: ${usage}`);
 }
 
+const VALUE_OPTIONS = new Set(["--cost", "--billing-day", "--plan", "--note"]);
+
+function parseArgv(argv: string[]): { flags: Set<string>; options: Map<string, string>; positional: string[] } {
+  const flags = new Set<string>();
+  const options = new Map<string, string>();
+  const positional: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a.startsWith("--")) {
+      const eq = a.indexOf("=");
+      if (eq !== -1) {
+        options.set(a.slice(0, eq), a.slice(eq + 1));
+      } else if (VALUE_OPTIONS.has(a)) {
+        const val = argv[i + 1];
+        if (val === undefined) throw new UsageError(`${a} requires a value`);
+        options.set(a, val);
+        i++;
+      } else {
+        flags.add(a);
+      }
+    } else {
+      positional.push(a);
+    }
+  }
+  return { flags, options, positional };
+}
+
 async function run(argv: string[]): Promise<number> {
-  const flags = new Set(argv.filter((a) => a.startsWith("--")));
-  const [group, action, ...args] = argv.filter((a) => !a.startsWith("--"));
+  const { flags, options, positional } = parseArgv(argv);
+  const [group, action, ...args] = positional;
   if (!group || flags.has("--help") || group === "help") {
     out(USAGE);
     return group || flags.has("--help") ? 0 : 2;
@@ -240,6 +286,105 @@ async function run(argv: string[]): Promise<number> {
         needArgs(args, 1, "prices unset <model>");
         const gone = await sql`delete from model_price_overrides where model = ${args[0]!} returning model`;
         out(gone.length > 0 ? `Removed the override for ${args[0]}.` : `There was no override for ${args[0]}.`);
+        return 0;
+      }
+      case "subscriptions list": {
+        needArgs(args, 0, "subscriptions list");
+        const rows = await listSubscriptions(sql);
+        const fmtMoney = (v: number | null) => (v === null ? "-" : `$${v.toFixed(2)}`);
+        table(
+          ["PROVIDER", "ACCOUNT", "PLAN", "COST/MO", "BILL DAY", "CYCLE WKS", "$/WEEK", "EVENTS", "REAL SPEND", "STATUS"],
+          rows.map((r) => [
+            r.provider,
+            r.source,
+            r.plan ?? "-",
+            fmtMoney(r.monthlyCostUsd),
+            r.billingDay !== null ? String(r.billingDay) : "1*",
+            r.currentCycle ? r.currentCycle.effectiveWeeks.toFixed(2) : "-",
+            r.currentCycle ? fmtMoney(r.currentCycle.costPerWeek) : "-",
+            String(r.events),
+            fmtMoney(r.subCostUsd),
+            r.ignored ? "ignored" : r.configured ? "configured" : r.monthlyCostUsd !== null ? "auto" : "unpriced",
+          ]),
+        );
+        return 0;
+      }
+      case "subscriptions set": {
+        needArgs(args, 2, "subscriptions set <provider> <account> --cost <usd> [--billing-day <1-31>] [--plan <plan>] [--note <text>]");
+        const costRaw = options.get("--cost");
+        if (costRaw === undefined) throw new UsageError("--cost <usd> is required");
+        const monthlyCostUsd = Number(costRaw);
+        if (!Number.isFinite(monthlyCostUsd) || monthlyCostUsd < 0) {
+          throw new UsageError(`--cost must be a non-negative number, got "${costRaw}"`);
+        }
+        const billRaw = options.get("--billing-day");
+        let billingDay: number | null | undefined = undefined;
+        if (billRaw !== undefined) {
+          const d = Number(billRaw);
+          if (!Number.isInteger(d) || d < 1 || d > 31) {
+            throw new UsageError(`--billing-day must be an integer 1..31, got "${billRaw}"`);
+          }
+          billingDay = d;
+        }
+        const sub = await upsertSubscription(sql, {
+          provider: args[0]!,
+          source: args[1]!,
+          monthlyCostUsd,
+          billingDay,
+          plan: options.get("--plan"),
+          note: options.get("--note"),
+          ignored: false,
+        });
+        const res = await recomputeSubscriptionCosts(sql);
+        out(
+          `Saved ${sub.provider} ${sub.source}: $${(sub.monthly_cost_usd ?? 0).toFixed(2)}/mo` +
+            (sub.billing_day ? `, billing day ${sub.billing_day}` : "") +
+            `. Recomputed ${res.eventsUpdated} event(s).`,
+        );
+        return 0;
+      }
+      case "subscriptions ignore": {
+        needArgs(args, 2, "subscriptions ignore <provider> <account>");
+        const sub = await setSubscriptionIgnored(sql, args[0]!, args[1]!, true);
+        const res = await recomputeSubscriptionCosts(sql);
+        out(`Ignored ${sub.provider} ${sub.source} ($0 spend). Recomputed ${res.eventsUpdated} event(s).`);
+        return 0;
+      }
+      case "subscriptions unignore": {
+        needArgs(args, 2, "subscriptions unignore <provider> <account>");
+        const sub = await setSubscriptionIgnored(sql, args[0]!, args[1]!, false);
+        const res = await recomputeSubscriptionCosts(sql);
+        const label = sub.monthly_cost_usd !== null ? `$${sub.monthly_cost_usd.toFixed(2)}/mo` : "auto plan default";
+        out(`Included ${sub.provider} ${sub.source} (${label}). Recomputed ${res.eventsUpdated} event(s).`);
+        return 0;
+      }
+      case "subscriptions delete": {
+        needArgs(args, 2, "subscriptions delete <provider> <account>");
+        const gone = await deleteSubscription(sql, args[0]!, args[1]!);
+        const res = await recomputeSubscriptionCosts(sql);
+        out(
+          (gone ? `Removed explicit subscription for ${args[0]} ${args[1]}.` : `No explicit subscription for ${args[0]} ${args[1]}.`) +
+            ` Recomputed ${res.eventsUpdated} event(s).`,
+        );
+        return 0;
+      }
+      case "subscriptions sync": {
+        needArgs(args, 0, "subscriptions sync");
+        const synced = await syncQuotaHistory(sql, proxy());
+        const res = await recomputeSubscriptionCosts(sql);
+        if (!synced.enabled) {
+          out(`Proxy quota history is disabled. Recomputed ${res.eventsUpdated} event(s) from stored data.`);
+        } else {
+          out(
+            `Synced ${synced.samplesStored} quota samples across ${synced.accounts} accounts. Recomputed ${res.eventsUpdated} / ${res.eventsChecked} event(s).`,
+          );
+        }
+        return 0;
+      }
+      case "subscriptions recompute": {
+        needArgs(args, 0, "subscriptions recompute");
+        const res = await recomputeSubscriptionCosts(sql);
+        out(`Recomputed ${res.eventsUpdated} / ${res.eventsChecked} event(s) across ${res.accounts} accounts.`);
         return 0;
       }
       default:

@@ -20,7 +20,7 @@ Every attempt sent to an AI provider is saved as its own database row, and you c
 One Bun process (`src/server/main.ts`) does four jobs:
 
 - **Collects usage.** Every two seconds (by default), it pulls usage records from the proxy's management API and saves them in Postgres in the `events` table. Pulling a record deletes it from the proxy's queue. If Postgres is down, records already pulled are held in a size-limited memory buffer and written once Postgres comes back. If that buffer fills up, Slopboard stops pulling and leaves new records in the proxy, which holds them for up to an hour. Each record has a unique per-attempt ID, so saving the same record twice is harmless.
-- **Updates prices.** Once a day, it downloads LiteLLM's public list of model prices. Dollar costs are never stored on individual rows. Instead, the `events_v` database view calculates what each request would have cost at public API prices whenever you read it. If a model cannot be matched confidently to a price, it gets no cost rather than a guessed one.
+- **Updates prices & subscription spend.** Once a day, it downloads LiteLLM's public list of model prices, and every few minutes it syncs quota history (`/v8/management/quota/history`) from the proxy. When subscriptions are configured or discovered from quota history, Slopboard computes each event's **real subscription spend** (`sub_cost_usd`) from its account's monthly fee, billing cycle, scheduled and bonus quota resets, and observed weekly quota burn. Without subscription data, it falls back to public API list prices (`api_cost_usd`).
 - **Serves the leaderboard.** `GET /api/board?range=today|7d|30d|all` returns everything the web page draws — awards and records included — cached for a few seconds. The shared TypeScript types are in `src/shared/api.ts`, and the web UI is in `src/web`.
 - **Answers SQL queries.** `POST /api/sql` runs read-only SQL queries for anyone who can reach the server (such as everyone on your tailnet, a private Tailscale network).
 
@@ -130,9 +130,17 @@ values ('house-model', 3e-6, 15e-6, 0.3e-6);
 
 ### How costs are calculated
 
-- Input tokens, cache reads, cache writes (both 5-minute and 1-hour), and output tokens are each priced at their own LiteLLM rate. If LiteLLM does not list a cache rate for a model, Slopboard falls back to that model's input rate.
-- When the proxy marks a response `speed = fast`, LiteLLM's `fast` multiplier is applied.
-- A model with no confident price match — or any event that contains unclassified tokens — gets no cost (`null`), rather than a guessed number.
+- **Subscription spend (primary when active):** For each upstream subscription account (Claude, Codex, etc.), Slopboard divides its monthly subscription fee by the effective weekly quotas supplied during its billing cycle (`days_in_cycle / 7` plus any mid-window bonus resets or early resets recorded in quota history). Weekly quota increments observed in upstream response headers and CLIProxyAPI's quota history are split across the events that caused each tick using empirically fitted per-model weights, then multiplied by that billing cycle's `$/week`. Providers without subscription quota data (such as Antigravity) stay `unpriced`.
+- **Manage subscriptions:** Accounts discovered in CLIProxyAPI's quota history automatically pick up default plan prices (`claude` `max20` $200, `max5` $100, `pro` $20; `codex` `pro` $200, `plus` $20). Set exact billing days, custom fees, or ignore low-tier accounts via the CLI:
+
+```bash
+slop subscriptions list
+slop subscriptions set claude account@example.com --cost 200 --billing-day 26
+slop subscriptions ignore claude small-pro@example.com
+slop subscriptions sync
+```
+
+- **Public API list prices (`api_cost_usd`):** Input tokens, cache reads, cache writes (both 5-minute and 1-hour), and output tokens are each priced at their own LiteLLM rate (with `fast` multiplier where applicable). Used as relative intra-tick weights, shown in tooltips for comparison, and used as the fallback when no subscription data exists.
 - **Not modelled:** long-context pricing tiers (above 200k/272k tokens), priority and flex tiers, batch discounts, and per-image or per-search charges.
 
 ## Querying with SQL
@@ -164,8 +172,10 @@ There is no login in front of `POST /api/sql`; see [Security notes](#security-no
 | Table or view | What it holds |
 | --- | --- |
 | `events` | One row per attempt sent to an AI provider. Holds extracted columns plus `raw`, the full record from the proxy with the plaintext key removed. |
-| `events_v` | **Query this one.** `events` joined with `person_id`, `person_name`, `unassigned`, `price_source`, and `cost_usd`. |
-| `threads_v` | One row per conversation thread: owner, start time, end time, tokens, cost, subagents, and model. |
+| `events_v` | **Query this one.** `events` joined with `person_id`, `person_name`, `unassigned`, `price_source`, `api_cost_usd`, `sub_cost_usd`, `quota_weeks`, and `cost_usd`. |
+| `threads_v` | One row per conversation thread: owner, start time, end time, tokens, cost (`sub_cost_usd`, `api_cost_usd`), subagents, and model. |
+| `subscriptions` | Configured monthly price, billing day of month, and ignore flag per upstream `(provider, source)`. |
+| `quota_samples` | Persisted weekly quota history synced from CLIProxyAPI `/v8/management/quota/history`. |
 | `people`, `api_keys` | People and which key hash belongs to whom (`revoked_at` is filled in once a key is revoked). |
 | `sessions` | Session tree: `session_id`, `parent_session_id`, and `thread_id` (the root session of the tree). |
 | `model_prices` | LiteLLM's downloaded price list. |

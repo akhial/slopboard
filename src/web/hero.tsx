@@ -127,8 +127,9 @@ export function Tiles({ board }: { board: Board }) {
   const unpriced = board.models.filter((m) => !m.priced);
   const failedShare = t.requests > 0 ? t.failedRequests / t.requests : 0;
   const level = gaugeLevel(t.tokensPerMinuteNow);
-  // Null means tokens without any list price. With no tokens at all it is a plain zero.
+  const isSub = board.costMode === "subscription";
   const cost = t.costUsd === null && t.tokens.total === 0 ? 0 : t.costUsd;
+  const listCost = t.listCostUsd;
   const tiles: TileSpec[] = [
     {
       key: "burn",
@@ -154,19 +155,32 @@ export function Tiles({ board }: { board: Board }) {
     {
       key: "invoice",
       icon: "receipt",
-      title: "Fake invoice",
+      title: isSub ? "Actual spend" : "Fake invoice",
       fill: "white",
       number: cost === null ? <span className="unpriced">unpriced</span> : <Num value={cost} format={usd} />,
       note: (
         <>
-          {cost === null ? "No public list price known for these models." : "List price. Flat-rate plans mean $0 billed."}
-          {t.costUsd !== null && unpriced.length > 0 ? <span title={`No public list price known for: ${unpriced.map((m) => m.displayName).join(", ")}`}> {unpriced.length} {unpriced.length === 1 ? "model" : "models"} unpriced.</span> : null}
+          {isSub
+            ? cost === null
+              ? "No subscription quota data for these models."
+              : listCost !== null && listCost > cost
+                ? `Real subscription quota burned (${usd(listCost)} at API list).`
+                : "Real subscription quota burned."
+            : cost === null
+              ? "No public list price known for these models."
+              : "List price. Flat-rate plans mean $0 billed."}
+          {t.costUsd !== null && unpriced.length > 0 ? (
+            <span title={`${isSub ? "Not metered by subscription quota" : "No public list price known for"}: ${unpriced.map((m) => m.displayName).join(", ")}`}>
+              {" "}
+              {unpriced.length} {unpriced.length === 1 ? "model" : "models"} {isSub ? "unmetered" : "unpriced"}.
+            </span>
+          ) : null}
         </>
       ),
       art: art(
         "receipt",
         <span className="scribble-note">
-          not a bill
+          {isSub ? "real money" : "not a bill"}
           <Doodle name="oval" />
         </span>,
       ),

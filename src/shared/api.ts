@@ -4,6 +4,9 @@
 /** Time window the board covers. "today" and "week" follow the board timezone. */
 export type RangeKey = "today" | "7d" | "30d" | "all";
 
+/** Whether `costUsd` reflects real subscription quota spend or public API list rates. */
+export type CostMode = "subscription" | "list";
+
 export interface TokenCounts {
   /** Input tokens that were not served from the prompt cache. */
   input: number;
@@ -39,10 +42,13 @@ export interface PersonRow {
   failedRequests: number;
   tokens: TokenCounts;
   /**
-   * What these tokens would cost at public API prices, in USD. 0 when there was no activity.
+   * Primary cost in USD: real subscription quota spend when `Board.costMode === "subscription"`,
+   * or public API list value when `"list"`. 0 when there was no activity.
    * Null only when there were tokens and none of them could be priced.
    */
   costUsd: number | null;
+  /** What these tokens would cost at public API list prices, in USD. */
+  listCostUsd: number | null;
   /** Distinct top-level threads (a thread is a root session plus its subagents). */
   threads: number;
   /** Distinct subagent sessions spawned. */
@@ -72,7 +78,8 @@ export interface ModelRow {
   requests: number;
   tokens: TokenCounts;
   costUsd: number | null;
-  /** False when no price is known, so costUsd is null. */
+  listCostUsd: number | null;
+  /** False when no price is known under the active cost mode, so costUsd is null. */
   priced: boolean;
   /** Person id with the most tokens on this model, or null. */
   topPersonId: string | null;
@@ -142,6 +149,7 @@ export interface BoardTotals {
   failedRequests: number;
   tokens: TokenCounts;
   costUsd: number | null;
+  listCostUsd: number | null;
   threads: number;
   subagents: number;
   /** Assigned people with at least one request in this range. */
@@ -157,6 +165,8 @@ export interface Board {
   rangeStart: string | null;
   /** IANA timezone used for days, hours and "today". */
   timezone: string;
+  /** Whether `costUsd` is real subscription spend or public API list price. */
+  costMode: CostMode;
   /** Newest event stored, null when the store is empty. */
   lastEventAt: string | null;
   /**

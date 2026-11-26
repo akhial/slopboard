@@ -18,6 +18,8 @@ export interface CollectorOptions {
   batch: number;
   /** Upper bound of records held in memory. */
   maxPending: number;
+  /** Called after new events are stored in Postgres. */
+  onStored?: (stored: number) => void;
   log?: (message: string) => void;
 }
 
@@ -99,6 +101,7 @@ export class Collector {
 
     try {
       result.stored = await this.flush();
+      if (result.stored > 0) this.opts.onStored?.(result.stored);
       if (result.proxyOk && Date.now() - this.lastPersistAt > PERSIST_EVERY_MS && this.lastPollOkAt !== null) {
         await setMeta(this.opts.sql, LAST_POLL_KEY, new Date(this.lastPollOkAt).toISOString());
         this.lastPersistAt = Date.now();

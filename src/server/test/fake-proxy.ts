@@ -9,11 +9,14 @@
 
 import type { Server } from "bun";
 import { createHash } from "node:crypto";
+import type { QuotaHistoryResponse } from "../proxy.ts";
 
 export class FakeProxy {
   queue: unknown[] = [];
   /** null: the config has no access.api-keys node. */
   apiKeys: string[] | null = [];
+  /** Quota history served at GET /v8/management/quota/history. Null returns 404. */
+  quotaHistory: QuotaHistoryResponse | null = { enabled: false, now: Date.now(), poll_interval_seconds: 600, accounts: [] };
   /** Requests that arrived without the right management key. */
   authFailures = 0;
   /** Every list a client wrote. */
@@ -87,6 +90,11 @@ export class FakeProxy {
       }
       this.pops++;
       return Response.json(this.queue.splice(0, count));
+    }
+
+    if (url.pathname === "/v8/management/quota/history" && req.method === "GET") {
+      if (this.quotaHistory === null) return Response.json({ error: "not_found" }, { status: 404 });
+      return Response.json(this.quotaHistory);
     }
 
     if (url.pathname === "/v8/management/config/access/api-keys") {

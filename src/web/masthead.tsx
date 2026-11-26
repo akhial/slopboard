@@ -5,7 +5,7 @@ import type { MouseEvent } from "react";
 import type { Board } from "../shared/api.ts";
 import { hrefFor, navigate, RANGES, REFRESH_MS, useNow } from "./data.ts";
 import type { BoardState, UrlState } from "./data.ts";
-import { ago, clockFor, duration } from "./format.ts";
+import { ago, clockFor, duration, usd } from "./format.ts";
 import { SCENARIOS } from "./mock.ts";
 import { useTheme } from "./theme.ts";
 import type { ThemeChoice } from "./theme.ts";
@@ -217,18 +217,42 @@ export function Ticker({ board, down = false }: { board: Board | null; down?: bo
   );
 }
 
-/** The pretend bill, explained, as a bank-style promo nobody should click. */
-export function PretendBill() {
+/** How the dollar numbers work, as a bank-style promo nobody should click. */
+export function PretendBill({ board }: { board: Board }) {
+  const isSub = board.costMode === "subscription";
+  const cost = board.totals.costUsd;
+  const listCost = board.totals.listCostUsd;
+  const multiplier = isSub && cost !== null && cost > 0 && listCost !== null && listCost > cost ? Math.round(listCost / cost) : null;
   return (
     <aside className="promo" aria-labelledby="promo-title">
       <div className="promo-text">
         <h2 id="promo-title">
-          Earn
-          <br />
-          nothing
+          {isSub ? (
+            <>
+              Real
+              <br />
+              receipts
+            </>
+          ) : (
+            <>
+              Earn
+              <br />
+              nothing
+            </>
+          )}
         </h2>
         <p>
-          Get up to 0% APY on every token. "Fake invoice" is what all this would cost at public API list rates. Nobody pays it: we're on flat subscriptions, so the only ones losing money are the labs. "Unpriced" means we don't know a model's list rate yet, not that it's free.
+          {isSub ? (
+            <>
+              Dollar figures are actual subscription spend: each account's monthly fee split across its billing cycle (scheduled weeks plus bonus resets) and attributed by measured quota burn.
+              {multiplier !== null && multiplier >= 2 && listCost !== null ? ` That's ${multiplier}× cheaper than the ${usd(listCost)} public API list rate.` : ""}{" "}
+              "Unpriced" means a provider isn't metered by subscription quota yet, not that it's free.
+            </>
+          ) : (
+            <>
+              Get up to 0% APY on every token. "Fake invoice" is what all this would cost at public API list rates. Nobody pays it: we're on flat subscriptions, so the only ones losing money are the labs. "Unpriced" means we don't know a model's list rate yet, not that it's free.
+            </>
+          )}
         </p>
       </div>
       <div className="promo-art" aria-hidden="true">

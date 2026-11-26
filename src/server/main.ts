@@ -7,6 +7,7 @@ import { connect, ensureReadonlyRole, migrate, type Db } from "./db.ts";
 import { startServer } from "./http.ts";
 import { schedulePriceRefresh } from "./prices.ts";
 import { ProxyClient } from "./proxy.ts";
+import { scheduleSubscriptionSync } from "./subscriptions.ts";
 
 const log = (message: string) => console.log(`[slopboard] ${message}`);
 
@@ -44,6 +45,12 @@ if (config.databaseRoUrl) {
 
 const prices = schedulePriceRefresh(sql, config.pricesUrl, config.pricesRefreshHours);
 
+const proxyClient =
+  config.collectorEnabled && config.proxyUrl && config.proxyManagementKey
+    ? new ProxyClient(config.proxyUrl, config.proxyManagementKey)
+    : null;
+const subscriptions = scheduleSubscriptionSync(sql, proxyClient, config.subscriptionSyncSeconds);
+
 let collector: Collector | null = null;
 if (!config.collectorEnabled) {
   log("collector disabled by COLLECTOR_ENABLED");
@@ -54,10 +61,11 @@ if (!config.collectorEnabled) {
 } else {
   collector = new Collector({
     sql,
-    proxy: new ProxyClient(config.proxyUrl, config.proxyManagementKey),
+    proxy: proxyClient!,
     pollIntervalMs: config.pollIntervalMs,
     batch: config.pollBatch,
     maxPending: config.maxPending,
+    onStored: () => subscriptions.nudge(),
   });
   await collector.start();
   log(`collecting from ${config.proxyUrl} every ${config.pollIntervalMs} ms`);
@@ -85,6 +93,7 @@ async function shutdown(signal: string): Promise<void> {
   stopping = true;
   log(`${signal}, shutting down`);
   prices.stop();
+  subscriptions.stop();
   await server.stop();
   // The collector holds records that exist nowhere else: give it its last flush.
   await collector?.stop();

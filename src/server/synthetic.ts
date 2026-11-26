@@ -45,6 +45,8 @@ export interface SyntheticRecord {
   clientIp?: string;
   /** Account the upstream credential belongs to. */
   source?: string;
+  /** Upstream response headers (e.g. Anthropic / Codex rate-limit headers). */
+  responseHeaders?: Record<string, string[]>;
 }
 
 const NO_USAGE: Usage = { input: 0, cacheRead: 0, cacheWrite: 0, answer: 0, reasoning: 0 };
@@ -153,5 +155,6 @@ export function usageRecord(o: SyntheticRecord): Record<string, unknown> {
     reasoning_effort: u.reasoning > 0 ? "high" : "",
     service_tier: "default",
     ...(o.speed ? { speed: o.speed } : {}),
+    ...(o.responseHeaders ? { response_headers: o.responseHeaders } : {}),
   };
 }
