@@ -15,6 +15,7 @@ import type {
 import { buildAwards, buildRecords, type PersonStats, type RecordInputs } from "./awards.ts";
 import { num, numOrNull, type Db } from "./db.ts";
 import { displayModelName } from "./format.ts";
+import { buildPoolStatuses, type PoolAccountInput } from "./pools.ts";
 
 export const RANGES: readonly RangeKey[] = ["today", "7d", "30d", "all"];
 export const SHARED_ID = "shared";
@@ -318,6 +319,8 @@ export async function buildBoard(
     busiestHour,
     biggestDay,
     slow,
+    poolSampleRows,
+    poolSubRows,
   ] = await Promise.all([
     query(sql, `select id, name from people order by id`),
     query(
@@ -484,6 +487,22 @@ export async function buildBoard(
       withP([since, tz]),
     ),
     slowFacts(sql, tz, providers),
+    query(
+      sql,
+      `select lower(provider) as provider, source, ts, used_pct, reset_at, plan
+       from quota_samples
+       where window_id = 'seven_day'
+         and ts >= now() - interval '14 days'
+         ${andP(1)}
+       order by provider, source, ts`,
+      withP([]),
+    ),
+    query(
+      sql,
+      `select lower(provider) as provider, source, plan, ignored
+       from subscriptions ${whereP(1)}`,
+      withP([]),
+    ),
   ]);
 
   // ---- timeline
@@ -661,6 +680,44 @@ export async function buildBoard(
     biggestDay: biggestDay[0],
   };
 
+  const poolSubs = new Map<string, { plan: string | null; ignored: boolean }>();
+  for (const r of poolSubRows) {
+    const provider = String(r.provider).toLowerCase();
+    const source = String(r.source);
+    poolSubs.set(`${provider}\0${source}`, {
+      plan: r.plan ? String(r.plan) : null,
+      ignored: r.ignored === true,
+    });
+  }
+  const poolInputs = new Map<string, PoolAccountInput>();
+  for (const r of poolSampleRows) {
+    const provider = String(r.provider).toLowerCase();
+    const source = String(r.source);
+    const key = `${provider}\0${source}`;
+    let acc = poolInputs.get(key);
+    if (!acc) {
+      const sub = poolSubs.get(key);
+      acc = {
+        provider,
+        source,
+        explicitPlan: sub?.plan ?? null,
+        ignored: sub?.ignored ?? false,
+        samples: [],
+      };
+      poolInputs.set(key, acc);
+    }
+    const tsDate = date(r.ts);
+    if (!tsDate) continue;
+    const resetDate = date(r.reset_at);
+    acc.samples.push({
+      tsMs: tsDate.getTime(),
+      usedPct: num(r.used_pct),
+      resetAtMs: resetDate ? resetDate.getTime() : null,
+      plan: r.plan ? String(r.plan) : null,
+    });
+  }
+  const pools = buildPoolStatuses([...poolInputs.values()], now.getTime(), providers);
+
   return {
     generatedAt: now.toISOString(),
     range,
@@ -669,6 +726,7 @@ export async function buildBoard(
     costMode,
     providers,
     availableProviders,
+    pools,
     lastEventAt: iso(bounds?.last_event_at),
     collectorLagSeconds,
     totals,

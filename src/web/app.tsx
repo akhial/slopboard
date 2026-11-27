@@ -7,6 +7,7 @@ import { providerLabel, rangeInfo, sameProviders, useBoard, useUrlState } from "
 import { Guilt, HeroMain, Tiles } from "./hero.tsx";
 import { Feed, Models } from "./lists.tsx";
 import { Alerts, DemoBar, Footer, Masthead, PretendBill, Ticker } from "./masthead.tsx";
+import { PoolStrip } from "./pools.tsx";
 import { Bench, Podium, Standings } from "./ranking.tsx";
 import { DayOne, Down, Loading, QuietRange } from "./states.tsx";
 import { contenders } from "./ui.tsx";
@@ -65,6 +66,9 @@ function BoardView({ board, switching }: { board: Board; switching: boolean }) {
               <Tiles board={board} />
             </Guard>
           </div>
+          <Guard>
+            <PoolStrip board={board} />
+          </Guard>
           {quiet ? (
             <>
               <QuietRange range={board.range} providers={board.providers} />

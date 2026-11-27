@@ -158,6 +158,37 @@ export interface BoardTotals {
   tokensPerMinuteNow: number;
 }
 
+export interface PoolPoint {
+  /** ISO timestamp. */
+  at: string;
+  /** Pool percent available at this instant (0..capacity). */
+  remaining: number;
+}
+
+/** Live weekly quota pool summary for one provider (no account identifiers). */
+export interface PoolStatus {
+  /** Provider id, e.g. "claude", "codex", "antigravity". */
+  provider: string;
+  /** Active non-ignored accounts contributing to this pool. */
+  accounts: number;
+  /** Pool percent currently available (weighted by plan tier; max tier = 100%). */
+  remaining: number;
+  /** Full pool capacity in pool-percent units (e.g. 560 for 5x Max20 + 1x Max5 + 1x Pro). */
+  capacity: number;
+  /** Pool percent burned per hour over the last 6 hours, or null if history is too short. */
+  burnPerHour: number | null;
+  /** Next scheduled pool refill timestamp (ISO), or null if unknown. */
+  nextResetAt: string | null;
+  /** Pool percent returned at the next refill, or null. */
+  nextResetAmount: number | null;
+  /** Projected timestamp (ISO) when the pool runs empty at current burn rate, or null if not within 7 days. */
+  emptyAt: string | null;
+  /** Compact recorded pool-available trajectory over the last 3 days, oldest first. */
+  recorded: PoolPoint[];
+  /** Compact projected pool-available trajectory over the next 4 days, starting at now. */
+  projected: PoolPoint[];
+}
+
 export interface Board {
   generatedAt: string;
   range: RangeKey;
@@ -171,6 +202,8 @@ export interface Board {
   providers: string[] | null;
   /** Every provider ever seen in the store, in display order. */
   availableProviders: string[];
+  /** Live weekly quota pools (filtered by `providers` when active). Empty when no quota history exists. */
+  pools: PoolStatus[];
   /** Newest event stored, null when the store is empty. */
   lastEventAt: string | null;
   /**
