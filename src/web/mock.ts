@@ -725,7 +725,7 @@ function idleRow(who: Profile, rank: number, buckets: number): PersonRow {
 }
 
 /** Nothing stored yet. With `registered`, keys have been handed out; without, nobody exists. */
-function emptyBoard(range: RangeKey, now: number, registered: boolean): Board {
+function emptyBoard(range: RangeKey, now: number, registered: boolean, providers: string[] | null = null): Board {
   const w = getWorld(now);
   const win = windowFor(range, { today: w.today, events: [] }, now);
   const people = registered
@@ -741,6 +741,8 @@ function emptyBoard(range: RangeKey, now: number, registered: boolean): Board {
     rangeStart: win.start === null ? null : new Date(win.start).toISOString(),
     timezone: TZ,
     costMode: "subscription",
+    availableProviders: [],
+    providers,
     lastEventAt: null,
     collectorLagSeconds: registered ? 4 : null,
     totals: { requests: 0, failedRequests: 0, tokens: { ...ZERO }, costUsd: 0, listCostUsd: 0, threads: 0, subagents: 0, people: 0, tokensPerMinuteNow: 0 },
@@ -755,17 +757,31 @@ function emptyBoard(range: RangeKey, now: number, registered: boolean): Board {
 }
 
 /** The board as the server would compute it at `now`. */
-export function mockBoard(range: RangeKey, scenario: Scenario = "normal", now: number = Date.now()): Board {
-  if (scenario === "empty" || scenario === "never") return emptyBoard(range, now, scenario === "empty");
+export function mockBoard(
+  range: RangeKey,
+  scenario: Scenario = "normal",
+  providers: readonly string[] | null = null,
+  now: number = Date.now(),
+): Board {
+  const activeProviders =
+    providers && providers.length > 0 ? [...new Set(providers.map((p) => p.trim().toLowerCase()).filter(Boolean))].sort() : null;
+  if (scenario === "empty" || scenario === "never") return emptyBoard(range, now, scenario === "empty", activeProviders);
   const w = getWorld(now);
   const clock = clockFor(TZ);
   const lag = scenario === "stale" ? STALE_LAG_SECONDS : scenario === "lagging" ? LAGGING_SECONDS : 0;
   // "quiet" pretends the latest request was yesterday evening, so a today window is empty.
   const cut = lag ? now - lag * 1000 : scenario === "quiet" ? dayStart(w.today) - 5 * HOUR : now;
   if (scenario === "sharedonly") w.sharedOnly ??= w.events.filter((e) => PEOPLE[e.p]?.unassigned);
-  const events = scenario === "sharedonly" ? (w.sharedOnly ?? []) : w.events;
+  const baseEvents = scenario === "sharedonly" ? (w.sharedOnly ?? []) : w.events;
+  const availableProviders = [...new Set(MODELS.map((m) => m.provider.toLowerCase()))].sort();
+  const events = activeProviders
+    ? baseEvents.filter((e) => {
+        const prov = MODELS[e.m]?.provider.toLowerCase();
+        return prov !== undefined && activeProviders.includes(prov);
+      })
+    : baseEvents;
   const end = lowerBound(events, cut + 1);
-  const win = windowFor(range, w, scenario === "quiet" ? now : cut);
+  const win = windowFor(range, { today: w.today, events }, scenario === "quiet" ? now : cut);
   const begin = win.start === null ? 0 : lowerBound(events, win.start);
   const bucketCount = win.buckets.length;
 
@@ -1076,7 +1092,7 @@ export function mockBoard(range: RangeKey, scenario: Scenario = "normal", now: n
 
   let lastTen = 0;
   for (let i = lowerBound(events, now - 10 * 60_000); i < end; i++) lastTen += events[i]?.total ?? 0;
-  const lastEvent = events[end - 1];
+  const lastEvent = baseEvents[lowerBound(baseEvents, cut + 1) - 1];
 
   return {
     generatedAt: new Date(now).toISOString(),
@@ -1084,6 +1100,8 @@ export function mockBoard(range: RangeKey, scenario: Scenario = "normal", now: n
     rangeStart: win.start === null ? null : new Date(win.start).toISOString(),
     timezone: TZ,
     costMode: "subscription",
+    availableProviders,
+    providers: activeProviders,
     lastEventAt: lastEvent ? new Date(lastEvent.t).toISOString() : null,
     collectorLagSeconds: lag || 2 + (Math.floor(now / 1000) % 5),
     totals: {
@@ -1110,7 +1128,12 @@ export function mockBoard(range: RangeKey, scenario: Scenario = "normal", now: n
 let flakyLoads = 0;
 
 /** What the page calls in demo mode instead of fetch: latency and failures included. */
-export function loadMockBoard(range: RangeKey, scenario: Scenario, signal?: AbortSignal): Promise<Board> {
+export function loadMockBoard(
+  range: RangeKey,
+  scenario: Scenario,
+  providers: readonly string[] | null = null,
+  signal?: AbortSignal,
+): Promise<Board> {
   return new Promise((resolve, reject) => {
     if (scenario !== "flaky") flakyLoads = 0;
     const timer = setTimeout(() => {
@@ -1119,7 +1142,7 @@ export function loadMockBoard(range: RangeKey, scenario: Scenario, signal?: Abor
         return;
       }
       try {
-        resolve(mockBoard(range, scenario));
+        resolve(mockBoard(range, scenario, providers));
       } catch (err) {
         reject(err instanceof Error ? err : new Error(String(err)));
       }

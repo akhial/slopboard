@@ -167,6 +167,10 @@ export interface Board {
   timezone: string;
   /** Whether `costUsd` is real subscription spend or public API list price. */
   costMode: CostMode;
+  /** Active provider filter (sorted lowercase), or null when all providers are included. */
+  providers: string[] | null;
+  /** Every provider ever seen in the store, in display order. */
+  availableProviders: string[];
   /** Newest event stored, null when the store is empty. */
   lastEventAt: string | null;
   /**
@@ -192,7 +196,7 @@ export interface Board {
   recent: LiveEvent[];
 }
 
-/** GET /api/board?range=<RangeKey> -> Board */
+/** GET /api/board?range=<RangeKey>[&providers=claude,codex] -> Board */
 export const BOARD_PATH = "/api/board";
 
 /** GET /api/health -> Health */

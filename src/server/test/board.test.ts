@@ -43,9 +43,9 @@ function row(o: Partial<SyntheticRecord> & Pick<SyntheticRecord, "apiKey">): Eve
   return normalizeRecord(usageRecord({ kind: "claude", at: new Date(today), model: "priced-model", ...o }))!;
 }
 
-async function board(range: RangeKey): Promise<Board> {
+async function board(range: RangeKey, providers: readonly string[] | null = null): Promise<Board> {
   resetBoardCaches(db.sql);
-  const b = await buildBoard(db.sql, TZ, range, 7);
+  const b = await buildBoard(db.sql, TZ, range, 7, providers);
   // Through JSON, as the UI receives it.
   const wire: unknown = JSON.parse(JSON.stringify(b));
   assertBoard(wire);
@@ -326,17 +326,52 @@ describe("board", () => {
 
   test("the cache serves one build to many callers", async () => {
     let builds = 0;
-    const cache = new BoardCache(async (range) => {
+    const cache = new BoardCache(async (range, providers) => {
       builds++;
       await Bun.sleep(20);
-      return await buildBoard(db.sql, TZ, range, null);
+      return await buildBoard(db.sql, TZ, range, null, providers);
     }, 60_000);
     const boards = await Promise.all(Array.from({ length: 8 }, () => cache.get("7d")));
     expect(builds).toBe(1);
     expect(new Set(boards.map((b) => b.generatedAt)).size).toBe(1);
     await cache.get("7d");
     await cache.get("today");
-    expect(builds).toBe(2);
+    await cache.get("7d", ["claude"]);
+    await cache.get("7d", ["claude"]);
+    expect(builds).toBe(3);
+  });
+
+  test("filters totals, rankings, models, heatmap and recent feed by any provider combination", async () => {
+    const all30 = await board("30d");
+    expect(all30.providers).toBeNull();
+    expect(all30.availableProviders).toEqual(["claude", "codex", "gemini"]);
+
+    // Single provider: Codex only (Bob's weird-model request 3 days ago).
+    const codexOnly = await board("30d", ["codex"]);
+    expect(codexOnly.providers).toEqual(["codex"]);
+    expect(codexOnly.availableProviders).toEqual(["claude", "codex", "gemini"]);
+    expect(codexOnly.models.map((m) => m.provider)).toEqual(["codex"]);
+    expect(codexOnly.totals.requests).toBe(1);
+    expect(codexOnly.totals.tokens.total).toBe(10_000);
+    expect(person(codexOnly, "bob").rank).toBe(1);
+    expect(person(codexOnly, "alice").requests).toBe(0);
+    expect(codexOnly.heatmap.reduce((s, c) => s + c.tokens, 0)).toBe(10_000);
+    expect(codexOnly.recent).toHaveLength(1);
+
+    // Combination: Codex + Gemini (excludes Claude).
+    const combo = await board("30d", ["gemini", "codex"]);
+    expect(combo.providers).toEqual(["codex", "gemini"]);
+    expect(combo.models.every((m) => m.provider === "codex" || m.provider === "gemini")).toBe(true);
+    expect(combo.totals.tokens.total).toBe(21_000);
+    expect(combo.heatmap.reduce((s, c) => s + c.tokens, 0)).toBe(21_000);
+
+    // Provider with no events returns a valid quiet board without pretending it's day one.
+    const none = await board("30d", ["antigravity"]);
+    expect(none.providers).toEqual(["antigravity"]);
+    expect(none.lastEventAt).not.toBeNull();
+    expect(none.totals.requests).toBe(0);
+    expect(none.models).toEqual([]);
+    expect(none.recent).toEqual([]);
   });
 });
 

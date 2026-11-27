@@ -3,7 +3,7 @@ import type { ErrorInfo, ReactNode } from "react";
 import type { Board } from "../shared/api.ts";
 import { Awards, Records } from "./cabinet.tsx";
 import { Heatmap, Timeline } from "./charts.tsx";
-import { rangeInfo, useBoard, useUrlState } from "./data.ts";
+import { providerLabel, rangeInfo, sameProviders, useBoard, useUrlState } from "./data.ts";
 import { Guilt, HeroMain, Tiles } from "./hero.tsx";
 import { Feed, Models } from "./lists.tsx";
 import { Alerts, DemoBar, Footer, Masthead, PretendBill, Ticker } from "./masthead.tsx";
@@ -67,9 +67,17 @@ function BoardView({ board, switching }: { board: Board; switching: boolean }) {
           </div>
           {quiet ? (
             <>
-              <QuietRange range={board.range} />
+              <QuietRange range={board.range} providers={board.providers} />
               <Guard>
-                <Bench board={board} title="Everyone has an alibi" note={`Not a single person sent a request ${info.phrase}.`} />
+                <Bench
+                  board={board}
+                  title="Everyone has an alibi"
+                  note={
+                    board.providers
+                      ? `Not a single person sent a ${board.providers.map(providerLabel).join(" + ")} request ${info.phrase}.`
+                      : `Not a single person sent a request ${info.phrase}.`
+                  }
+                />
               </Guard>
             </>
           ) : (
@@ -117,16 +125,19 @@ export function App() {
   const { board, error, loading } = state;
   // The tab title carries the headline, for whoever keeps the board pinned.
   const leader = board ? contenders(board)[0]?.name : undefined;
+  const providerTitle = url.providers ? url.providers.map(providerLabel).join(" + ") : null;
   useEffect(() => {
-    document.title = leader ? `#1 ${leader} · Slopboard` : "Slopboard";
-  }, [leader]);
+    const parts = [leader ? `#1 ${leader}` : null, providerTitle, "Slopboard"].filter(Boolean);
+    document.title = parts.join(" · ");
+  }, [leader, providerTitle]);
+  const switching = board ? board.range !== url.range || !sameProviders(board.providers, url.providers) : false;
   return (
     <div className="page">
       {url.mock ? <DemoBar url={url} /> : null}
       <Masthead url={url} state={state} />
       <Ticker board={board} down={!board && error !== null} />
       <Alerts state={state} />
-      {board ? <BoardView board={board} switching={board.range !== url.range} /> : error ? <Down error={error} onRetry={state.refresh} loading={loading} /> : <Loading />}
+      {board ? <BoardView board={board} switching={switching} /> : error ? <Down error={error} onRetry={state.refresh} loading={loading} /> : <Loading />}
       <Footer board={board} mock={url.mock} />
     </div>
   );

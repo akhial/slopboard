@@ -2,7 +2,7 @@
 
 import type { MouseEvent } from "react";
 import type { Board, RangeKey } from "../shared/api.ts";
-import { hrefFor, navigate, rangeInfo, RANGES } from "./data.ts";
+import { hrefFor, navigate, providerLabel, rangeInfo, RANGES } from "./data.ts";
 import { Cutout, Doodle } from "./art.tsx";
 
 export function Loading() {
@@ -79,10 +79,11 @@ function go(event: MouseEvent<HTMLAnchorElement>) {
   navigate(href);
 }
 
-/** The store has history, but nobody did anything in the selected range. */
-export function QuietRange({ range }: { range: RangeKey }) {
+/** The store has history, but nobody did anything in the selected range (or provider filter). */
+export function QuietRange({ range, providers = null }: { range: RangeKey; providers?: readonly string[] | null }) {
   const info = rangeInfo(range);
   const wider = RANGES.filter((r) => RANGES.findIndex((x) => x.key === r.key) > RANGES.findIndex((x) => x.key === range));
+  const filtered = providers && providers.length > 0 ? providers.map(providerLabel).join(" + ") : null;
   return (
     <section className="state state-quiet" aria-labelledby="quiet-title">
       <div className="state-art-wrap" aria-hidden="true">
@@ -92,10 +93,19 @@ export function QuietRange({ range }: { range: RangeKey }) {
       <h2 id="quiet-title">
         Zero activity <em className="scrawl">{info.phrase}</em>
       </h2>
-      <p>Not a single request in this window, so the podium stays empty. Either everyone is writing code by hand or the Wi-Fi died.</p>
-      {wider.length > 0 ? (
+      <p>
+        {filtered
+          ? `Not a single ${filtered} request in this window, so the podium stays empty.`
+          : "Not a single request in this window, so the podium stays empty. Either everyone is writing code by hand or the Wi-Fi died."}
+      </p>
+      {filtered || wider.length > 0 ? (
         <p className="state-links">
           Widen the investigation:{" "}
+          {filtered ? (
+            <a className="btn btn-small" href={hrefFor({ providers: null })} onClick={go}>
+              All providers
+            </a>
+          ) : null}
           {wider.map((r) => (
             <a key={r.key} className="btn btn-small" href={hrefFor({ range: r.key })} onClick={go}>
               {r.label}
