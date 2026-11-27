@@ -15,6 +15,20 @@ const BOARD: Spec = {
   costMode: "costMode",
   providers: "providerList?",
   availableProviders: "providerList",
+  pools: [
+    {
+      provider: "string",
+      accounts: "int",
+      remaining: "number",
+      capacity: "number",
+      burnPerHour: "number?",
+      nextResetAt: "iso?",
+      nextResetAmount: "number?",
+      emptyAt: "iso?",
+      recorded: [{ at: "iso", remaining: "number" }],
+      projected: [{ at: "iso", remaining: "number" }],
+    },
+  ],
   lastEventAt: "iso?",
   collectorLagSeconds: "number?",
   totals: {

@@ -13,6 +13,8 @@ import type {
   LiveEvent,
   ModelRow,
   PersonRow,
+  PoolPoint,
+  PoolStatus,
   RangeKey,
   RecordCard,
   TokenCounts,
@@ -743,6 +745,7 @@ function emptyBoard(range: RangeKey, now: number, registered: boolean, providers
     costMode: "subscription",
     availableProviders: [],
     providers,
+    pools: [],
     lastEventAt: null,
     collectorLagSeconds: registered ? 4 : null,
     totals: { requests: 0, failedRequests: 0, tokens: { ...ZERO }, costUsd: 0, listCostUsd: 0, threads: 0, subagents: 0, people: 0, tokensPerMinuteNow: 0 },
@@ -1094,6 +1097,54 @@ export function mockBoard(
   for (let i = lowerBound(events, now - 10 * 60_000); i < end; i++) lastTen += events[i]?.total ?? 0;
   const lastEvent = baseEvents[lowerBound(baseEvents, cut + 1) - 1];
 
+  const makeMockPool = (
+    provider: string,
+    accounts: number,
+    remaining: number,
+    capacity: number,
+    burnPerHour: number,
+    resetHoursAhead: number,
+    resetAmount: number,
+  ): PoolStatus => {
+    const recorded: PoolPoint[] = [];
+    for (let h = 72; h >= 0; h -= 6) {
+      const t = now - h * HOUR;
+      const saw = h > 36 ? 0.55 : h > 12 ? 0.85 : 0.25;
+      const v = h === 0 ? remaining : Math.min(capacity, Math.max(0, remaining + (h / 72) * (capacity * 0.35 * saw)));
+      recorded.push({ at: new Date(t).toISOString(), remaining: Math.round(v * 100) / 100 });
+    }
+    const resetT = now + resetHoursAhead * HOUR;
+    const beforeReset = Math.max(0, remaining - burnPerHour * resetHoursAhead);
+    const afterReset = Math.min(capacity, beforeReset + resetAmount);
+    const endT = now + 96 * HOUR;
+    const afterEnd = Math.max(0, afterReset - burnPerHour * Math.max(0, 96 - resetHoursAhead));
+    const projected: PoolPoint[] = [
+      { at: new Date(now).toISOString(), remaining },
+      { at: new Date(resetT).toISOString(), remaining: Math.round(beforeReset * 100) / 100 },
+      { at: new Date(resetT).toISOString(), remaining: Math.round(afterReset * 100) / 100 },
+      { at: new Date(endT).toISOString(), remaining: Math.round(afterEnd * 100) / 100 },
+    ];
+    const emptyHours = burnPerHour > 0 && remaining / burnPerHour < resetHoursAhead ? remaining / burnPerHour : null;
+    return {
+      provider,
+      accounts,
+      remaining,
+      capacity,
+      burnPerHour,
+      nextResetAt: new Date(resetT).toISOString(),
+      nextResetAmount: resetAmount,
+      emptyAt: emptyHours !== null ? new Date(now + emptyHours * HOUR).toISOString() : null,
+      recorded,
+      projected,
+    };
+  };
+
+  const allMockPools: PoolStatus[] = [
+    makeMockPool("anthropic", 6, 148, 560, 2.9, 20, 100),
+    makeMockPool("openai", 2, 118, 200, 0.8, 54, 100),
+  ];
+  const pools = activeProviders ? allMockPools.filter((p) => activeProviders.includes(p.provider)) : allMockPools;
+
   return {
     generatedAt: new Date(now).toISOString(),
     range,
@@ -1102,6 +1153,7 @@ export function mockBoard(
     costMode: "subscription",
     availableProviders,
     providers: activeProviders,
+    pools,
     lastEventAt: lastEvent ? new Date(lastEvent.t).toISOString() : null,
     collectorLagSeconds: lag || 2 + (Math.floor(now / 1000) % 5),
     totals: {

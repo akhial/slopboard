@@ -29,6 +29,8 @@ const RESET_DROP_THRESHOLD = 5.0;
 const EARLY_RESET_MARGIN_MS = HOUR_MS;
 /** Stale in-flight responses may carry pre-reset utilization for a short window after a mid-window reset. */
 const STALE_POST_RESET_MS = 60_000;
+/** Max span of a transient wrong-pool / phantom-reset glitch before the real window resumes. */
+const GLITCH_REVERT_WINDOW_MS = 45 * 60_000;
 /** Maximum pull range accepted by CLIProxyAPI /v8/management/quota/history. */
 const PROXY_HISTORY_MAX_DAYS = 45;
 const LAST_SYNC_KEY = "subscriptions.quota_synced_at";
@@ -179,6 +181,65 @@ function isTransientDrop(points: readonly QuotaPoint[], index: number, highWater
 }
 
 /**
+ * Strips short-lived phantom-reset / wrong-pool glitches from chronological quota
+ * samples — e.g. an Antigravity fallback poll to `cloudcode-pa` reporting `usedPct=0`
+ * and `resetAt=now+7d` right between two genuine `daily-cloudcode-pa` reads at
+ * `usedPct=36%` with the real reset timestamp.
+ *
+ * A run of 1–3 dipped points (<= 45 min) is dropped only when a following sample
+ * unambiguously reverts to both the pre-drop `resetAt` (±10 min) and pre-drop
+ * utilization (`>= hw - 2`), so genuine resets and tier upgrades are never touched.
+ */
+export function filterGlitchSamples<T extends QuotaPoint>(points: readonly T[]): T[] {
+  if (points.length < 3) return [...points].sort((a, b) => a.tsMs - b.tsMs);
+  const sorted = [...points].sort((a, b) => a.tsMs - b.tsMs);
+  const out: T[] = [];
+  let hw: number | null = null;
+  let curResetAtMs: number | null = null;
+
+  for (let i = 0; i < sorted.length; i++) {
+    const p = sorted[i]!;
+    const drop = hw !== null ? hw - p.usedPct : 0;
+
+    if (hw !== null && drop >= RESET_DROP_THRESHOLD) {
+      let revertIdx = -1;
+      for (let j = i + 1; j < sorted.length && j <= i + 4; j++) {
+        const nxt = sorted[j]!;
+        const span = nxt.tsMs - p.tsMs;
+        if (span > GLITCH_REVERT_WINDOW_MS) break;
+        const usedReverted = nxt.usedPct >= hw - 2.0;
+        const resetReverted =
+          curResetAtMs !== null && nxt.resetAtMs !== null
+            ? Math.abs(nxt.resetAtMs - curResetAtMs) <= RESET_MERGE_MS
+            : span <= STALE_POST_RESET_MS;
+        if (usedReverted && resetReverted) {
+          revertIdx = j;
+          break;
+        }
+      }
+      if (revertIdx !== -1) {
+        i = revertIdx - 1;
+        continue;
+      }
+    }
+
+    out.push(p);
+    const raAdvanced = curResetAtMs !== null && p.resetAtMs !== null && p.resetAtMs > curResetAtMs + RESET_MERGE_MS;
+    if (raAdvanced) {
+      hw = p.usedPct;
+      curResetAtMs = p.resetAtMs;
+    } else if (hw !== null && drop >= RESET_DROP_THRESHOLD) {
+      hw = p.usedPct;
+      if (p.resetAtMs !== null) curResetAtMs = p.resetAtMs;
+    } else {
+      hw = hw === null ? p.usedPct : Math.max(hw, p.usedPct);
+      if (curResetAtMs === null && p.resetAtMs !== null) curResetAtMs = p.resetAtMs;
+    }
+  }
+  return out;
+}
+
+/**
  * Resolves the effective plan for a point, preferring specific tiers (`max20`,
  * `max5`) over the legacy generic `"max"` label when later samples clarified it.
  */
@@ -207,7 +268,7 @@ export function analyzeBillingCycles(
     ignored: boolean;
   },
 ): Map<string, CyclePricing> {
-  const sorted = [...points].sort((a, b) => a.tsMs - b.tsMs);
+  const sorted = filterGlitchSamples(points);
   const resolvedFallback = resolvePlanTimeline(sorted, opts.explicitPlan);
 
   const cycleBonuses = new Map<string, { cycle: BillingCycle; resets: DetectedReset[]; plan: string | null }>();
@@ -509,11 +570,12 @@ type StreamItem =
   | { kind: "sample"; tsMs: number; usedPct: number; resetAtMs: number | null };
 
 function mergeStream(events: readonly AttrEvent[], samples: readonly QuotaPoint[]): StreamItem[] {
+  const cleanSamples = filterGlitchSamples(samples);
   const items: StreamItem[] = [];
   for (const ev of events) {
     items.push({ kind: "event", tsMs: ev.tsMs, usedPct: ev.quotaUsedPct, resetAtMs: ev.quotaResetAtMs, ev });
   }
-  for (const s of samples) {
+  for (const s of cleanSamples) {
     items.push({ kind: "sample", tsMs: s.tsMs, usedPct: s.usedPct, resetAtMs: s.resetAtMs });
   }
   items.sort((a, b) => {
