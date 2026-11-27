@@ -670,4 +670,85 @@ describe("end-to-end subscription sync, board and CLI", () => {
     expect(Number(agRows[0]!.sub_cost_usd)).toBeCloseTo(0.1 * (200 / cycle.scheduledWeeks), 5);
     expect(Number(agRows[1]!.sub_cost_usd)).toBeCloseTo(0.1 * (200 / cycle.scheduledWeeks), 5);
   });
+
+  test("mid-cycle Pro -> Max5 upgrade prices pre-upgrade events at Pro ($20) and post-upgrade events at Max5 ($100)", async () => {
+    const now = Date.now();
+    const baseSec = Math.floor((now - HOUR) / 1000) * 1000;
+    const reset = baseSec + 5 * DAY;
+    const upgradeAt = baseSec + 30_000;
+
+    proxy.quotaHistory = {
+      enabled: true,
+      now,
+      poll_interval_seconds: 600,
+      accounts: [
+        {
+          auth_id: "claude-upgraded",
+          auth_index: "idx20",
+          file_name: "claude-upgraded.json",
+          provider: "claude",
+          label: "upgraded@example.com",
+          email: "upgraded@example.com",
+          plan: "max5",
+          plans: [
+            [baseSec - 60_000, "pro"],
+            [upgradeAt, "max5"],
+          ],
+          windows: [
+            {
+              id: "seven_day",
+              period_seconds: 604800,
+              points: [
+                [baseSec - 60_000, 0, reset],
+                [baseSec + 10_000, 100, reset],
+                [upgradeAt, 0, reset],
+                [upgradeAt + 10_000, 50, reset],
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const usage = { input: 100_000, cacheRead: 0, cacheWrite: 0, answer: 10_000, reasoning: 0 };
+    const hdr = (frac: number) => ({
+      "Anthropic-Ratelimit-Unified-7d-Utilization": [String(frac)],
+      "Anthropic-Ratelimit-Unified-7d-Reset": [String(Math.floor(reset / 1000))],
+    });
+
+    await insertEvents(db.sql, [
+      // Pre-upgrade on Pro: burns 100% of a Pro week
+      {
+        ...normalizeRecord(usageRecord({ kind: "claude", at: new Date(baseSec + 10_000), apiKey: KEY_ADA, model: "priced-model", source: "upgraded@example.com", usage, responseHeaders: hdr(1.0) }))!,
+        event_id: "pre-upgrade-pro",
+      },
+      // Post-upgrade on Max5: burns 50% of a Max5 week
+      {
+        ...normalizeRecord(usageRecord({ kind: "claude", at: new Date(upgradeAt + 10_000), apiKey: KEY_BOB, model: "priced-model", source: "upgraded@example.com", usage, responseHeaders: hdr(0.5) }))!,
+        event_id: "post-upgrade-max5",
+      },
+    ]);
+
+    const client = new ProxyClient(proxy.url, proxy.managementKey);
+    await syncQuotaHistory(db.sql, client);
+
+    // Setting --billing-day alone keeps automatic plan pricing across tiers.
+    const billingDay = new Date(baseSec).getUTCDate();
+    const setRes = await cli(["subscriptions", "set", "claude", "upgraded@example.com", "--billing-day", String(billingDay)]);
+    expect(setRes.code).toBe(0);
+    expect(setRes.stdout).toContain("auto plan default");
+
+    const cycle = billingCycleFor(baseSec, billingDay);
+    const rows = await db.sql<{ event_id: string; quota_weeks: string | null; sub_cost_usd: string | null }[]>`
+      select event_id, quota_weeks, sub_cost_usd from events
+      where provider = 'claude' and source = 'upgraded@example.com'
+      order by ts asc`;
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.event_id).toBe("pre-upgrade-pro");
+    expect(rows[1]!.event_id).toBe("post-upgrade-max5");
+    // Pre-upgrade Pro event: 1.0 wk * ($20 / scheduledWeeks)
+    expect(Number(rows[0]!.sub_cost_usd)).toBeCloseTo(1.0 * (20 / cycle.scheduledWeeks), 5);
+    // Post-upgrade Max5 event: 0.5 wk * ($100 / scheduledWeeks)
+    expect(Number(rows[1]!.sub_cost_usd)).toBeCloseTo(0.5 * (100 / cycle.scheduledWeeks), 5);
+  });
 });

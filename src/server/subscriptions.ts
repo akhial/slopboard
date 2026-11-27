@@ -1184,11 +1184,41 @@ export async function recomputeSubscriptionCosts(sql: Db): Promise<RecomputeResu
         ? explicitMonthlyCost
         : defaultPlanMonthlyCost(provider, fallbackPlan);
 
+    // Compact plan timeline from quota_samples so mid-cycle tier upgrades (e.g. Pro -> Max5)
+    // price historical events at the tier active when they ran instead of retroactively
+    // applying the newer tier's fee to earlier smaller quotas.
+    const planPoints: { tsMs: number; plan: string }[] = [];
+    for (const s of samples) {
+      const p = s.plan?.trim().toLowerCase();
+      if (!p) continue;
+      if (planPoints.length === 0 || planPoints[planPoints.length - 1]!.plan !== p) {
+        planPoints.push({ tsMs: s.tsMs, plan: p });
+      }
+    }
+    const planAtTs = (tsMs: number): string | null => {
+      if (planPoints.length === 0) return null;
+      let cur = planPoints[0]!.plan;
+      for (let i = 0; i < planPoints.length; i++) {
+        if (planPoints[i]!.tsMs <= tsMs) cur = planPoints[i]!.plan;
+        else break;
+      }
+      return cur;
+    };
+
     const costPerWeekAt = (tsMs: number): number | null => {
+      if (ignored) return 0;
       const cycle = billingCycleFor(tsMs, billingDay);
       const found = cycles.get(cycle.key);
+      const effectiveWeeks = found ? found.effectiveWeeks : cycle.scheduledWeeks;
+      const activePlan = planAtTs(tsMs);
+      if (activePlan && fallbackPlan && isPlanTierChange(activePlan, fallbackPlan)) {
+        const historicalMonthly = defaultPlanMonthlyCost(provider, activePlan);
+        if (historicalMonthly !== null && effectiveWeeks > 0) {
+          return historicalMonthly / effectiveWeeks;
+        }
+      }
       if (found) return found.costPerWeek;
-      return fallbackMonthly !== null ? fallbackMonthly / cycle.scheduledWeeks : null;
+      return fallbackMonthly !== null && effectiveWeeks > 0 ? fallbackMonthly / effectiveWeeks : null;
     };
 
     const group = planGroupOf(key, provider);
