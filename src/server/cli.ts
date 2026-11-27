@@ -312,12 +312,18 @@ async function run(argv: string[]): Promise<number> {
       case "subscriptions set": {
         needArgs(args, 2, "subscriptions set <provider> <account> --cost <usd> [--billing-day <1-31>] [--plan <plan>] [--note <text>]");
         const costRaw = options.get("--cost");
-        if (costRaw === undefined) throw new UsageError("--cost <usd> is required");
-        const monthlyCostUsd = Number(costRaw);
-        if (!Number.isFinite(monthlyCostUsd) || monthlyCostUsd < 0) {
-          throw new UsageError(`--cost must be a non-negative number, got "${costRaw}"`);
-        }
         const billRaw = options.get("--billing-day");
+        const planRaw = options.get("--plan");
+        if (costRaw === undefined && billRaw === undefined && planRaw === undefined) {
+          throw new UsageError("provide at least one of --cost <usd>, --billing-day <1-31>, or --plan <name>");
+        }
+        let monthlyCostUsd: number | null = null;
+        if (costRaw !== undefined) {
+          monthlyCostUsd = Number(costRaw);
+          if (!Number.isFinite(monthlyCostUsd) || monthlyCostUsd < 0) {
+            throw new UsageError(`--cost must be a non-negative number, got "${costRaw}"`);
+          }
+        }
         let billingDay: number | null | undefined = undefined;
         if (billRaw !== undefined) {
           const d = Number(billRaw);
@@ -331,13 +337,14 @@ async function run(argv: string[]): Promise<number> {
           source: args[1]!,
           monthlyCostUsd,
           billingDay,
-          plan: options.get("--plan"),
+          plan: planRaw,
           note: options.get("--note"),
           ignored: false,
         });
         const res = await recomputeSubscriptionCosts(sql);
+        const costLabel = sub.monthly_cost_usd !== null ? `$${sub.monthly_cost_usd.toFixed(2)}/mo` : "auto plan default";
         out(
-          `Saved ${sub.provider} ${sub.source}: $${(sub.monthly_cost_usd ?? 0).toFixed(2)}/mo` +
+          `Saved ${sub.provider} ${sub.source}: ${costLabel}` +
             (sub.billing_day ? `, billing day ${sub.billing_day}` : "") +
             `. Recomputed ${res.eventsUpdated} event(s).`,
         );
