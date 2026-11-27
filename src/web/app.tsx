@@ -4,6 +4,7 @@ import type { Board } from "../shared/api.ts";
 import { Awards, Records } from "./cabinet.tsx";
 import { Heatmap, Timeline } from "./charts.tsx";
 import { providerLabel, rangeInfo, sameProviders, useBoard, useUrlState } from "./data.ts";
+import { Economics } from "./economics.tsx";
 import { Guilt, HeroMain, Tiles } from "./hero.tsx";
 import { Feed, Models } from "./lists.tsx";
 import { Alerts, DemoBar, Footer, Masthead, PretendBill, Ticker } from "./masthead.tsx";
@@ -111,6 +112,9 @@ function BoardView({ board, switching }: { board: Board; switching: boolean }) {
               <Feed board={board} />
             </Guard>
           </div>
+          <Guard>
+            <Economics board={board} />
+          </Guard>
           <div className="duo">
             <Guard>
               <Heatmap board={board} />

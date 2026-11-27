@@ -70,6 +70,14 @@ export function Models({ board }: { board: Board }) {
               <p className="dish-meta">
                 <span className="tag">{m.provider}</span>
                 <code>{m.model}</code>
+                {isSub && m.subsidyMultiplier !== null && m.subsidyMultiplier >= 1.5 ? (
+                  <span
+                    className="tag tag-subsidy"
+                    title={`Public API list value is ${m.subsidyMultiplier.toFixed(1)}× the actual subscription spend`}
+                  >
+                    {m.subsidyMultiplier >= 100 ? `${Math.round(m.subsidyMultiplier)}×` : `${m.subsidyMultiplier.toFixed(1)}×`} subsidy
+                  </span>
+                ) : null}
                 <span>{sum > 0 ? pct(m.tokens.total / sum) : "–"} share</span>
                 <span>
                   {compact(m.requests)} {m.requests === 1 ? "request" : "requests"}
