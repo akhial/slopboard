@@ -2,7 +2,7 @@
 
 import type { Server } from "bun";
 import { BOARD_PATH, type ApiError, type Board, type Health, type RangeKey } from "../shared/api.ts";
-import { BoardCache, buildBoard, isRangeKey, RANGES } from "./board.ts";
+import { BoardCache, buildBoard, isRangeKey, parseProvidersParam, RANGES } from "./board.ts";
 import type { Collector } from "./collector.ts";
 import { num, type Db } from "./db.ts";
 import { runReadOnly, SqlGate, SqlRequestError } from "./sqlapi.ts";
@@ -40,16 +40,22 @@ function fail(error: string, status: number): Response {
 
 export function startServer(deps: ServerDeps): Server<undefined> {
   const lag = () => deps.collector?.lagSeconds() ?? null;
-  const boards = new BoardCache((range: RangeKey) => buildBoard(deps.sql, deps.boardTz, range, lag()), deps.boardCacheMs);
+  const boards = new BoardCache(
+    (range: RangeKey, providers: string[] | null) => buildBoard(deps.sql, deps.boardTz, range, lag(), providers),
+    deps.boardCacheMs,
+  );
 
   const sqlGate = new SqlGate();
   let eventCount = { at: 0, value: 0 };
 
   async function board(req: Request): Promise<Response> {
-    const range = new URL(req.url).searchParams.get("range") ?? "7d";
+    const params = new URL(req.url).searchParams;
+    const range = params.get("range") ?? "7d";
     if (!isRangeKey(range)) return fail(`range must be one of ${RANGES.join(", ")}`, 400);
+    const parsedProviders = parseProvidersParam(params.getAll("providers"));
+    if (!parsedProviders.ok) return fail(parsedProviders.error, 400);
     try {
-      const cached = await boards.get(range);
+      const cached = await boards.get(range, parsedProviders.providers);
       // The lag keeps moving while the rest of the board sits in the cache.
       return json({ ...cached, collectorLagSeconds: lag() } satisfies Board);
     } catch (error) {

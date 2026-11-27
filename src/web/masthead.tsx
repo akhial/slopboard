@@ -3,7 +3,7 @@
 
 import type { MouseEvent } from "react";
 import type { Board } from "../shared/api.ts";
-import { hrefFor, navigate, RANGES, REFRESH_MS, useNow } from "./data.ts";
+import { hrefFor, navigate, providerLabel, RANGES, REFRESH_MS, sameProviders, toggleProvider, useNow } from "./data.ts";
 import type { BoardState, UrlState } from "./data.ts";
 import { ago, clockFor, duration, usd } from "./format.ts";
 import { SCENARIOS } from "./mock.ts";
@@ -125,6 +125,64 @@ export function taglineFor(board: Board | null): string {
   return TAGLINES[Math.floor(Date.now() / 86_400_000) % TAGLINES.length]?.(board) ?? "";
 }
 
+function ProviderFilter({ url, state }: { url: UrlState; state: BoardState }) {
+  const board = state.board;
+  const available = board?.availableProviders ?? [];
+  // Keep any provider named in the URL visible even if it has zero events yet.
+  const extras = (url.providers ?? []).filter((p) => !available.includes(p));
+  const list = [...available, ...extras];
+  if (list.length < 2 && url.providers === null) return null;
+
+  const isAll = url.providers === null;
+  const pending = state.loading && !sameProviders(board?.providers ?? null, url.providers);
+
+  return (
+    <nav className="providers" aria-label="Providers">
+      <a
+        href={hrefFor({ providers: null })}
+        onClick={go}
+        aria-pressed={isAll}
+        className={isAll ? (pending ? "is-active is-pending" : "is-active") : undefined}
+        title="Show all providers"
+      >
+        All
+      </a>
+      {list.map((p) => {
+        const selected = !isAll && (url.providers?.includes(p) ?? false);
+        const next = toggleProvider(url.providers, p, list);
+        const label = providerLabel(p);
+        const hint = isAll
+          ? `Show only ${label}`
+          : selected
+            ? next === null
+              ? "Reset to all providers"
+              : `Remove ${label} from filter`
+            : next === null
+              ? `Add ${label} (shows all providers)`
+              : `Add ${label} to filter`;
+        const classes = ["provider-pill"];
+        if (selected) classes.push("is-active");
+        else if (!isAll) classes.push("is-dim");
+        if (pending && selected) classes.push("is-pending");
+        return (
+          <a
+            key={p}
+            href={hrefFor({ providers: next })}
+            onClick={go}
+            aria-pressed={selected}
+            className={classes.join(" ")}
+            data-provider={p}
+            title={hint}
+          >
+            <span className="provider-dot" aria-hidden="true" />
+            {label}
+          </a>
+        );
+      })}
+    </nav>
+  );
+}
+
 export function Masthead({ url, state }: { url: UrlState; state: BoardState }) {
   const board = state.board;
   return (
@@ -135,6 +193,7 @@ export function Masthead({ url, state }: { url: UrlState; state: BoardState }) {
         </span>
       </h1>
       <div className="controls">
+        <ProviderFilter url={url} state={state} />
         <nav className="ranges" aria-label="Time range">
           {RANGES.map((r) => (
             <a key={r.key} href={hrefFor({ range: r.key })} onClick={go} aria-current={url.range === r.key ? "page" : undefined} className={state.loading && url.range === r.key && board?.range !== r.key ? "is-pending" : undefined}>

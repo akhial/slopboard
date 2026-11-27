@@ -20,8 +20,61 @@ export const RANGES: readonly RangeKey[] = ["today", "7d", "30d", "all"];
 export const SHARED_ID = "shared";
 export const SHARED_NAME = "Shared key";
 
+const PROVIDER_ORDER = ["claude", "codex", "antigravity"];
+const PROVIDER_TOKEN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const MAX_PROVIDERS = 20;
+
 export function isRangeKey(value: unknown): value is RangeKey {
   return typeof value === "string" && (RANGES as readonly string[]).includes(value);
+}
+
+/** Canonical display order for available providers: core providers first, then alphabetical. */
+export function sortAvailableProviders(providers: Iterable<string>): string[] {
+  const unique = new Set<string>();
+  for (const p of providers) {
+    const clean = p.trim().toLowerCase();
+    if (clean) unique.add(clean);
+  }
+  return [...unique].sort((a, b) => {
+    const ia = PROVIDER_ORDER.indexOf(a);
+    const ib = PROVIDER_ORDER.indexOf(b);
+    if (ia !== -1 || ib !== -1) return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
+    return a.localeCompare(b);
+  });
+}
+
+/** Canonical sorted, deduplicated lowercase provider filter, or null when unfiltered. */
+export function normalizeProviders(providers: readonly string[] | null | undefined): string[] | null {
+  if (!providers || providers.length === 0) return null;
+  const set = new Set<string>();
+  for (const p of providers) {
+    const clean = p.trim().toLowerCase();
+    if (clean) set.add(clean);
+  }
+  return set.size > 0 ? [...set].sort() : null;
+}
+
+/** Parses one or more `providers` query parameter values (comma-separated or repeated). */
+export function parseProvidersParam(
+  rawValues: readonly string[],
+): { ok: true; providers: string[] | null } | { ok: false; error: string } {
+  if (rawValues.length === 0) return { ok: true, providers: null };
+  const set = new Set<string>();
+  for (const raw of rawValues) {
+    for (const part of raw.split(",")) {
+      const clean = part.trim().toLowerCase();
+      if (!clean) continue;
+      if (!PROVIDER_TOKEN.test(clean)) {
+        return { ok: false, error: `invalid provider "${part.trim()}"` };
+      }
+      set.add(clean);
+      if (set.size > MAX_PROVIDERS) {
+        return { ok: false, error: `too many providers (max ${MAX_PROVIDERS})` };
+      }
+    }
+  }
+  if (set.size === 0) return { ok: false, error: "providers must name at least one provider" };
+  return { ok: true, providers: [...set].sort() };
 }
 
 /** Whole days before today that the range reaches back. */
@@ -91,15 +144,19 @@ interface SlowFacts {
 }
 
 const SLOW_TTL_MS = 30_000;
+const SLOW_MAX_ENTRIES = 32;
 const slowCache = new WeakMap<Db, Map<string, Promise<SlowFacts>>>();
 
-async function loadSlowFacts(sql: Db, tz: string): Promise<SlowFacts> {
+async function loadSlowFacts(sql: Db, tz: string, providers: readonly string[] | null): Promise<SlowFacts> {
+  const dayWhere = providers ? `where lower(provider) = any($2::text[])` : "";
+  const dayParams: unknown[] = providers ? [tz, providers] : [tz];
+  const heatAnd = providers ? `and lower(provider) = any($2::text[])` : "";
   const [dayRows, heatRows, todayRows] = await Promise.all([
     query(
       sql,
       `select person_id, to_char((ts at time zone $1)::date, 'YYYY-MM-DD') as day, max(ts) as last_seen
-       from events_v group by 1, 2`,
-      [tz],
+       from events_v ${dayWhere} group by 1, 2`,
+      dayParams,
     ),
     query(
       sql,
@@ -109,9 +166,10 @@ async function loadSlowFacts(sql: Db, tz: string): Promise<SlowFacts> {
               ${REQUESTS}::int as requests
        from events_v
        where ts >= (date_trunc('day', now() at time zone $1) - interval '27 days') at time zone $1
+       ${heatAnd}
        group by 1, 2
        order by 1, 2`,
-      [tz],
+      dayParams,
     ),
     query(sql, `select to_char((now() at time zone $1)::date, 'YYYY-MM-DD') as today`, [tz]),
   ]);
@@ -140,16 +198,21 @@ async function loadSlowFacts(sql: Db, tz: string): Promise<SlowFacts> {
   };
 }
 
-async function slowFacts(sql: Db, tz: string): Promise<SlowFacts> {
-  let byTz = slowCache.get(sql);
-  if (!byTz) slowCache.set(sql, (byTz = new Map()));
-  const cached = byTz.get(tz);
+async function slowFacts(sql: Db, tz: string, providers: readonly string[] | null): Promise<SlowFacts> {
+  let byKey = slowCache.get(sql);
+  if (!byKey) slowCache.set(sql, (byKey = new Map()));
+  const key = `${tz}\0${providers ? providers.join(",") : ""}`;
+  const cached = byKey.get(key);
   if (cached) {
     const facts = await cached.catch(() => null);
     if (facts && Date.now() - facts.at < SLOW_TTL_MS) return facts;
   }
-  const fresh = loadSlowFacts(sql, tz);
-  byTz.set(tz, fresh);
+  if (byKey.size >= SLOW_MAX_ENTRIES) {
+    const oldest = byKey.keys().next().value;
+    if (oldest !== undefined) byKey.delete(oldest);
+  }
+  const fresh = loadSlowFacts(sql, tz, providers);
+  byKey.set(key, fresh);
   return await fresh;
 }
 
@@ -187,19 +250,26 @@ export async function buildBoard(
   tz: string,
   range: RangeKey,
   collectorLagSeconds: number | null,
+  rawProviders: readonly string[] | null = null,
 ): Promise<Board> {
+  const providers = normalizeProviders(rawProviders);
   const days = range === "all" ? 0 : DAYS_BACK[range];
-  const [bounds] = await query(
-    sql,
-    `select now() as now,
-            (b.today - make_interval(days => $2::int)) at time zone $1 as since,
-            (b.today - make_interval(days => 2 * $2::int + 1)) at time zone $1 as prev_since,
-            (select max(ts) from events) as last_event_at,
-            (exists (select 1 from subscriptions where not ignored and monthly_cost_usd is not null)
-             or exists (select 1 from events where sub_cost_usd is not null)) as has_sub
-     from (select date_trunc('day', now() at time zone $1) as today) b`,
-    [tz, days],
-  );
+  const [boundsRows, providerRows] = await Promise.all([
+    query(
+      sql,
+      `select now() as now,
+              (b.today - make_interval(days => $2::int)) at time zone $1 as since,
+              (b.today - make_interval(days => 2 * $2::int + 1)) at time zone $1 as prev_since,
+              (select max(ts) from events) as last_event_at,
+              (exists (select 1 from subscriptions where not ignored and monthly_cost_usd is not null)
+               or exists (select 1 from events where sub_cost_usd is not null)) as has_sub
+       from (select date_trunc('day', now() at time zone $1) as today) b`,
+      [tz, days],
+    ),
+    query(sql, `select distinct lower(provider) as provider from models where provider is not null`),
+  ]);
+  const bounds = boundsRows[0];
+  const availableProviders = sortAvailableProviders(providerRows.map((r) => String(r.provider)));
   const now = date(bounds?.now) ?? new Date();
   const rangeStart = range === "all" ? null : date(bounds?.since);
   const prevStart = range === "all" ? null : date(bounds?.prev_since);
@@ -209,6 +279,10 @@ export async function buildBoard(
   const since = rangeStart ?? new Date(0);
   const unit: Timeline["unit"] = range === "today" ? "hour" : "day";
 
+  const andP = (idx: number) => (providers ? `and lower(provider) = any($${idx}::text[])` : "");
+  const whereP = (idx: number) => (providers ? `where lower(provider) = any($${idx}::text[])` : "");
+  const withP = (base: unknown[]) => (providers ? [...base, providers] : base);
+
   const bucketSql =
     range === "today"
       ? `select g at time zone $1 as bucket
@@ -217,12 +291,13 @@ export async function buildBoard(
       : range === "all"
         ? `select g at time zone $1 as bucket
            from generate_series(
-             coalesce((select date_trunc('day', min(ts) at time zone $1) from events),
+             coalesce((select date_trunc('day', min(ts) at time zone $1) from events ${whereP(2)}),
                       date_trunc('day', now() at time zone $1)),
              date_trunc('day', now() at time zone $1), interval '1 day') g`
         : `select g at time zone $1 as bucket
            from generate_series(date_trunc('day', now() at time zone $1) - make_interval(days => ${days}),
                                 date_trunc('day', now() at time zone $1), interval '1 day') g`;
+  const bucketParams = range === "all" ? withP([tz]) : [tz];
 
   const [
     registered,
@@ -266,9 +341,9 @@ export async function buildBoard(
               avg(ttft_ms) filter (where not failed and ttft_ms > 0)::float8 as avg_ttft_ms,
               coalesce(max(input_tokens + cache_read_tokens + cache_write_tokens + unclassified_tokens), 0)::float8 as biggest_prompt
        from events_v
-       where ts >= $1
+       where ts >= $1 ${andP(3)}
        group by person_id`,
-      [since, tz],
+      withP([since, tz]),
     ),
     query(
       sql,
@@ -280,29 +355,29 @@ export async function buildBoard(
               count(distinct thread_id)::int as threads,
               count(distinct session_id) filter (where is_subagent)::int as subagents
        from events_v
-       where ts >= $1`,
-      [since],
+       where ts >= $1 ${andP(2)}`,
+      withP([since]),
     ),
     query(
       sql,
       `select person_id, requested_model as model, sum(total_tokens)::float8 as tokens
-       from events_v where ts >= $1 group by 1, 2`,
-      [since],
+       from events_v where ts >= $1 ${andP(2)} group by 1, 2`,
+      withP([since]),
     ),
     query(
       sql,
       `select person_id, extract(hour from ts at time zone $2)::int as hour, sum(total_tokens)::float8 as tokens
-       from events_v where ts >= $1 group by 1, 2`,
-      [since, tz],
+       from events_v where ts >= $1 ${andP(3)} group by 1, 2`,
+      withP([since, tz]),
     ),
-    query(sql, bucketSql, [tz]),
+    query(sql, bucketSql, bucketParams),
     query(
       sql,
       `select person_id,
               date_trunc('${unit}', ts at time zone $2) at time zone $2 as bucket,
               sum(total_tokens)::float8 as tokens
-       from events_v where ts >= $1 group by 1, 2`,
-      [since, tz],
+       from events_v where ts >= $1 ${andP(3)} group by 1, 2`,
+      withP([since, tz]),
     ),
     query(
       sql,
@@ -315,25 +390,27 @@ export async function buildBoard(
               ${costMode === "subscription" ? "bool_or(sub_cost_usd is not null)" : "bool_or(price_source is not null)"} as priced,
               bool_or(price_source is not null) as list_priced
        from events_v
-       where ts >= $1
+       where ts >= $1 ${andP(2)}
        group by requested_model`,
-      [since],
+      withP([since]),
     ),
     query(
       sql,
       `select ts, person_id, requested_model as model, total_tokens::float8 as tokens, ${costCol} as cost_usd, is_subagent, failed
-       from events_v order by ts desc limit 30`,
+       from events_v ${whereP(1)} order by ts desc limit 30`,
+      withP([]),
     ),
     query(
       sql,
-      `select coalesce(sum(total_tokens), 0)::float8 / 10 as tpm from events where ts >= now() - interval '10 minutes'`,
+      `select coalesce(sum(total_tokens), 0)::float8 / 10 as tpm from events where ts >= now() - interval '10 minutes' ${andP(1)}`,
+      withP([]),
     ),
     prevStart
       ? query(
           sql,
           `select person_id, sum(total_tokens)::float8 as tokens
-           from events_v where ts >= $1 and ts < $2 group by 1`,
-          [prevStart, since],
+           from events_v where ts >= $1 and ts < $2 ${andP(3)} group by 1`,
+          withP([prevStart, since]),
         )
       : Promise.resolve([] as Row[]),
     // Per person, their thread with the most tokens, the longest span and the most subagents.
@@ -351,7 +428,7 @@ export async function buildBoard(
                 coalesce(mode() within group (order by requested_model) filter (where not is_subagent),
                          mode() within group (order by requested_model)) as model
          from events_v
-         where ts >= $1 and thread_id is not null
+         where ts >= $1 and thread_id is not null ${andP(2)}
          group by thread_id
        ), r as (
          select t.*,
@@ -361,30 +438,30 @@ export async function buildBoard(
          from t
        )
        select * from r where rn_tokens = 1 or rn_duration = 1 or rn_subagents = 1`,
-      [since],
+      withP([since]),
     ),
     query(
       sql,
       `select ts, person_id, requested_model as model, total_tokens::float8 as tokens,
               cache_read_tokens::float8 as cache_read,
               (input_tokens + cache_read_tokens + cache_write_tokens)::float8 as prompt
-       from events_v where ts >= $1 and total_tokens > 0
+       from events_v where ts >= $1 and total_tokens > 0 ${andP(2)}
        order by total_tokens desc, ts limit 1`,
-      [since],
+      withP([since]),
     ),
     query(
       sql,
       `select ts, person_id, requested_model as model, total_tokens::float8 as tokens, ${costCol} as cost_usd
-       from events_v where ts >= $1 and ${costCol} > 0
+       from events_v where ts >= $1 and ${costCol} > 0 ${andP(2)}
        order by ${costCol} desc, ts limit 1`,
-      [since],
+      withP([since]),
     ),
     query(
       sql,
       `select ts, person_id, requested_model as model, total_tokens::float8 as tokens, latency_ms::float8 as latency_ms
-       from events_v where ts >= $1 and not failed and latency_ms > 0
+       from events_v where ts >= $1 and not failed and latency_ms > 0 ${andP(2)}
        order by latency_ms desc, ts limit 1`,
-      [since],
+      withP([since]),
     ),
     query(
       sql,
@@ -392,9 +469,9 @@ export async function buildBoard(
               date_trunc('hour', ts at time zone $2) at time zone $2 as bucket,
               sum(total_tokens)::float8 as tokens,
               ${REQUESTS}::int as requests
-       from events_v where ts >= $1
+       from events_v where ts >= $1 ${andP(3)}
        group by 1, 2 order by tokens desc, bucket limit 1`,
-      [since, tz],
+      withP([since, tz]),
     ),
     query(
       sql,
@@ -402,11 +479,11 @@ export async function buildBoard(
               date_trunc('day', ts at time zone $2) at time zone $2 as bucket,
               sum(total_tokens)::float8 as tokens,
               ${REQUESTS}::int as requests
-       from events_v where ts >= $1
+       from events_v where ts >= $1 ${andP(3)}
        group by 1, 2 order by tokens desc, bucket limit 1`,
-      [since, tz],
+      withP([since, tz]),
     ),
-    slowFacts(sql, tz),
+    slowFacts(sql, tz, providers),
   ]);
 
   // ---- timeline
@@ -590,6 +667,8 @@ export async function buildBoard(
     rangeStart: rangeStart?.toISOString() ?? null,
     timezone: tz,
     costMode,
+    providers,
+    availableProviders,
     lastEventAt: iso(bounds?.last_event_at),
     collectorLagSeconds,
     totals,
@@ -611,28 +690,39 @@ interface CacheEntry {
   inflight: Promise<Board> | null;
 }
 
+const BOARD_CACHE_MAX_ENTRIES = 64;
+
 /**
- * Serves boards from memory for `ttlMs`, with one query run per range no
- * matter how many tabs ask at once. A board older than that but not ancient is
- * still returned at once while a fresh one is built in the background.
+ * Serves boards from memory for `ttlMs`, with one query run per (range, providers)
+ * key no matter how many tabs ask at once. A board older than that but not ancient
+ * is still returned at once while a fresh one is built in the background.
  */
 export class BoardCache {
-  private readonly entries = new Map<RangeKey, CacheEntry>();
+  private readonly entries = new Map<string, CacheEntry>();
 
   constructor(
-    private readonly build: (range: RangeKey) => Promise<Board>,
+    private readonly build: (range: RangeKey, providers: string[] | null) => Promise<Board>,
     private readonly ttlMs: number,
   ) {}
 
-  async get(range: RangeKey): Promise<Board> {
-    const entry = this.entries.get(range) ?? { at: 0, board: null, inflight: null };
-    this.entries.set(range, entry);
+  async get(range: RangeKey, rawProviders: readonly string[] | null = null): Promise<Board> {
+    const providers = normalizeProviders(rawProviders);
+    const key = `${range}\0${providers ? providers.join(",") : ""}`;
+    let entry = this.entries.get(key);
+    if (!entry) {
+      if (this.entries.size >= BOARD_CACHE_MAX_ENTRIES) {
+        const oldest = this.entries.keys().next().value;
+        if (oldest !== undefined) this.entries.delete(oldest);
+      }
+      entry = { at: 0, board: null, inflight: null };
+      this.entries.set(key, entry);
+    }
     const age = Date.now() - entry.at;
     const cached = entry.board;
     if (cached && age < this.ttlMs) return cached;
 
     if (!entry.inflight) {
-      entry.inflight = this.build(range)
+      entry.inflight = this.build(range, providers)
         .then((board) => {
           entry.board = board;
           entry.at = Date.now();

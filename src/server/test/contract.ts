@@ -13,6 +13,8 @@ const BOARD: Spec = {
   rangeStart: "iso?",
   timezone: "string",
   costMode: "costMode",
+  providers: "providerList?",
+  availableProviders: "providerList",
   lastEventAt: "iso?",
   collectorLagSeconds: "number?",
   totals: {
@@ -85,6 +87,8 @@ const SCALARS: Record<string, (v: unknown) => boolean> = {
   weekday: (v) => isInt(v) && v <= 6,
   range: (v) => ["today", "7d", "30d", "all"].includes(v as string),
   costMode: (v) => v === "subscription" || v === "list",
+  providerList: (v) =>
+    Array.isArray(v) && v.every((s) => typeof s === "string" && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(s)),
   unit: (v) => v === "hour" || v === "day",
   series: (v) =>
     typeof v === "object" && v !== null && Object.values(v).every((s) => Array.isArray(s) && s.every(isInt)),

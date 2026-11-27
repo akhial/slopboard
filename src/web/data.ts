@@ -25,15 +25,84 @@ export function rangeInfo(key: RangeKey) {
 
 export interface UrlState {
   range: RangeKey;
+  /** Active provider filter (sorted lowercase), or null for all providers. */
+  providers: readonly string[] | null;
   mock: boolean;
   scenario: Scenario;
+}
+
+const PROVIDER_LABELS: Record<string, string> = {
+  claude: "Claude",
+  codex: "Codex",
+  antigravity: "Antigravity",
+  gemini: "Gemini",
+  openai: "OpenAI",
+  anthropic: "Anthropic",
+};
+
+export function providerLabel(id: string): string {
+  const key = id.trim().toLowerCase();
+  return PROVIDER_LABELS[key] ?? (key ? key.charAt(0).toUpperCase() + key.slice(1) : id);
+}
+
+const PROVIDER_ORDER = ["claude", "codex", "antigravity"];
+
+export function normalizeProviders(values: readonly string[] | null | undefined): string[] | null {
+  if (!values || values.length === 0) return null;
+  const set = new Set<string>();
+  for (const v of values) {
+    for (const part of v.split(",")) {
+      const clean = part.trim().toLowerCase();
+      if (clean) set.add(clean);
+    }
+  }
+  if (set.size === 0) return null;
+  return [...set].sort((a, b) => {
+    const ia = PROVIDER_ORDER.indexOf(a);
+    const ib = PROVIDER_ORDER.indexOf(b);
+    if (ia !== -1 || ib !== -1) return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
+    return a.localeCompare(b);
+  });
+}
+
+export function sameProviders(a: readonly string[] | null, b: readonly string[] | null): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  const setB = new Set(b);
+  return a.every((v) => setB.has(v));
+}
+
+/**
+ * Click behavior for provider toggle pills:
+ * - From "All" (null): clicking a provider focuses that single provider.
+ * - From a subset: clicking toggles that provider in/out of the combination.
+ * - Toggling off the last active provider or enabling every available provider resets to "All" (null).
+ */
+export function toggleProvider(
+  current: readonly string[] | null,
+  provider: string,
+  available: readonly string[],
+): string[] | null {
+  const id = provider.trim().toLowerCase();
+  if (!id) return current ? [...current] : null;
+  if (current === null) {
+    if (available.length <= 1 && available.includes(id)) return null;
+    return [id];
+  }
+  const set = new Set(current);
+  if (set.has(id)) set.delete(id);
+  else set.add(id);
+  if (set.size === 0) return null;
+  if (available.length > 0 && available.every((p) => set.has(p))) return null;
+  return normalizeProviders([...set]);
 }
 
 function parse(search: string): UrlState {
   const q = new URLSearchParams(search);
   const range = RANGES.find((r) => r.key === q.get("range"))?.key ?? DEFAULT_RANGE;
+  const providers = normalizeProviders(q.getAll("providers"));
   const mock = q.has("mock") && q.get("mock") !== "0" && q.get("mock") !== "false";
-  return { range, mock, scenario: mock ? parseScenario(q.get("scenario")) : "normal" };
+  return { range, providers, mock, scenario: mock ? parseScenario(q.get("scenario")) : "normal" };
 }
 
 /** A link to the same page with some of the state changed. Unknown parameters are kept. */
@@ -42,6 +111,11 @@ export function hrefFor(patch: Partial<UrlState>): string {
   if (patch.range) {
     if (patch.range === DEFAULT_RANGE) q.delete("range");
     else q.set("range", patch.range);
+  }
+  if ("providers" in patch) {
+    const clean = normalizeProviders(patch.providers);
+    if (!clean) q.delete("providers");
+    else q.set("providers", clean.join(","));
   }
   if (patch.scenario) {
     if (patch.scenario === "normal") q.delete("scenario");
@@ -81,10 +155,12 @@ function looksLikeBoard(value: unknown): value is Board {
   return Array.isArray(v.people) && Array.isArray(v.models) && typeof v.totals === "object" && v.totals !== null && typeof v.timeline === "object" && v.timeline !== null;
 }
 
-async function fetchBoard(range: RangeKey, signal: AbortSignal): Promise<Board> {
+async function fetchBoard(range: RangeKey, providers: readonly string[] | null, signal: AbortSignal): Promise<Board> {
+  const params = new URLSearchParams({ range });
+  if (providers && providers.length > 0) params.set("providers", providers.join(","));
   let res: Response;
   try {
-    res = await fetch(`${BOARD_PATH}?range=${encodeURIComponent(range)}`, { signal, headers: { accept: "application/json" }, cache: "no-store" });
+    res = await fetch(`${BOARD_PATH}?${params.toString()}`, { signal, headers: { accept: "application/json" }, cache: "no-store" });
   } catch (err) {
     if (signal.aborted) throw err;
     throw new Error("No answer from the server. Check that it's running and you're on the right network.");
@@ -125,6 +201,7 @@ export function useBoard(url: UrlState): BoardState {
   const [state, setState] = useState<Omit<BoardState, "refresh">>({ board: null, error: null, loading: true, fetchedAt: null, nextAt: null });
   const [tick, setTick] = useState(0);
   const refresh = useCallback(() => setTick((n) => n + 1), []);
+  const providersKey = url.providers ? url.providers.join(",") : "";
   const source = `${url.mock ? "mock" : "live"}:${url.scenario}`;
   const lastSource = useRef(source);
 
@@ -159,7 +236,9 @@ export function useBoard(url: UrlState): BoardState {
       controller.signal.addEventListener("abort", abort);
       const timeout = setTimeout(abort, REQUEST_TIMEOUT_MS);
       try {
-        const board = url.mock ? await loadMockBoard(url.range, url.scenario, attempt.signal) : await fetchBoard(url.range, attempt.signal);
+        const board = url.mock
+          ? await loadMockBoard(url.range, url.scenario, url.providers, attempt.signal)
+          : await fetchBoard(url.range, url.providers, attempt.signal);
         if (controller.signal.aborted) return;
         registerPeople(board.people);
         setState((s) => ({ ...s, board, error: null, loading: false, fetchedAt: Date.now() }));
@@ -186,7 +265,7 @@ export function useBoard(url: UrlState): BoardState {
       clearTimeout(timer);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [url.range, url.mock, url.scenario, source, tick]);
+  }, [url.range, providersKey, url.mock, url.scenario, source, tick]);
 
   return { ...state, refresh };
 }

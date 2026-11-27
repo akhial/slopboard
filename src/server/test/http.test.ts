@@ -104,10 +104,32 @@ describe("http", () => {
     expect(live.collectorLagSeconds).toBeNull();
   });
 
-  test("a bad range and unknown paths are refused with an ApiError", async () => {
+  test("a bad range, bad providers, and unknown paths are refused with an ApiError", async () => {
     const bad = await get(`${BOARD_PATH}?range=forever`);
     expect(bad.status).toBe(400);
     expect(((await bad.json()) as ApiError).error).toContain("today, 7d, 30d, all");
+
+    const badProvider = await get(`${BOARD_PATH}?range=7d&providers=claude,bad!name`);
+    expect(badProvider.status).toBe(400);
+    expect(((await badProvider.json()) as ApiError).error).toContain("invalid provider");
+
+    const emptyProvider = await get(`${BOARD_PATH}?range=7d&providers=`);
+    expect(emptyProvider.status).toBe(400);
+
+    const claudeRes = await get(`${BOARD_PATH}?range=7d&providers=claude`);
+    expect(claudeRes.status).toBe(200);
+    const claudeBoard: unknown = await claudeRes.json();
+    assertBoard(claudeBoard);
+    expect(claudeBoard.providers).toEqual(["claude"]);
+    expect(claudeBoard.totals.requests).toBe(4);
+
+    const codexRes = await get(`${BOARD_PATH}?range=7d&providers=codex`);
+    expect(codexRes.status).toBe(200);
+    const codexBoard: unknown = await codexRes.json();
+    assertBoard(codexBoard);
+    expect(codexBoard.providers).toEqual(["codex"]);
+    expect(codexBoard.totals.requests).toBe(0);
+
     expect((await get("/api/nope")).status).toBe(404);
     expect((await fetch(new URL(BOARD_PATH, server.url), { method: "POST" })).status).toBe(405);
     expect((await get("/api/sql")).status).toBe(405);

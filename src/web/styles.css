@@ -690,12 +690,16 @@ a {
 
 .controls {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 0.7rem;
 }
 
-.ranges {
+.ranges,
+.providers {
   display: inline-flex;
+  flex-wrap: wrap;
   gap: 0.2rem;
   padding: 0.3rem;
   border-radius: 99rem;
@@ -703,29 +707,64 @@ a {
   box-shadow: var(--shadow-s);
 }
 
-.ranges a {
-  display: grid;
-  place-items: center;
+.ranges a,
+.providers a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.42rem;
   min-height: 2.4rem;
-  padding: 0 1.1rem;
+  padding: 0 1.05rem;
   border-radius: 99rem;
   font-size: 0.95rem;
   font-weight: 650;
   text-decoration: none;
   white-space: nowrap;
-  transition: background 0.12s, color 0.12s;
+  transition: background 0.12s, color 0.12s, opacity 0.12s;
 }
 
-.ranges a:hover {
+.ranges a:hover,
+.providers a:hover {
   background: var(--card-2);
 }
 
-.ranges a[aria-current] {
+.ranges a[aria-current],
+.providers a.is-active {
   background: var(--fg);
   color: var(--bg);
 }
 
-.ranges a.is-pending {
+.providers a.is-dim {
+  opacity: 0.62;
+}
+
+.providers a.is-dim:hover {
+  opacity: 1;
+}
+
+.provider-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  flex: none;
+  background: var(--prov-dot, var(--lime));
+}
+
+.provider-pill[data-provider="claude"] {
+  --prov-dot: #e87b54;
+}
+.provider-pill[data-provider="codex"] {
+  --prov-dot: #10b981;
+}
+.provider-pill[data-provider="antigravity"] {
+  --prov-dot: #c575f8;
+}
+.provider-pill[data-provider="gemini"] {
+  --prov-dot: #4ea1ff;
+}
+
+.ranges a.is-pending,
+.providers a.is-pending {
   animation: pending 0.9s ease-in-out infinite alternate;
 }
 
@@ -3201,13 +3240,17 @@ a {
   }
   .controls {
     width: 100%;
+    justify-content: flex-start;
   }
-  .ranges {
-    flex: 1;
+  .ranges,
+  .providers {
+    flex: 1 1 auto;
   }
-  .ranges a {
+  .ranges a,
+  .providers a {
     flex: 1;
-    padding: 0 0.3rem;
+    padding: 0 0.55rem;
+    font-size: 0.88rem;
   }
   .demo-note {
     display: none;

@@ -43,13 +43,16 @@ const server = Bun.serve({
   routes: {
     "/": index,
     [BOARD_PATH]: (req: Request) => {
-      const requested = new URL(req.url).searchParams.get("range") ?? "7d";
+      const params = new URL(req.url).searchParams;
+      const requested = params.get("range") ?? "7d";
       const range = RANGE_KEYS.find((r) => r === requested);
       if (!range) return fail(400, `unknown range "${requested}"`);
+      const rawProviders = params.getAll("providers").flatMap((s) => s.split(",")).map((s) => s.trim().toLowerCase()).filter(Boolean);
+      const providers = rawProviders.length > 0 ? [...new Set(rawProviders)].sort() : null;
       const scenario = scenarioFor(req);
       if (scenario !== "flaky") flakyHits = 0;
       if (scenario === "error" || (scenario === "flaky" && flakyHits++ > 0)) return fail(503, MOCK_ERROR);
-      return Response.json(mockBoard(range, scenario), { headers: { "cache-control": "no-store" } });
+      return Response.json(mockBoard(range, scenario, providers), { headers: { "cache-control": "no-store" } });
     },
   },
   fetch() {
