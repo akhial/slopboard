@@ -751,4 +751,143 @@ describe("end-to-end subscription sync, board and CLI", () => {
     // Post-upgrade Max5 event: 0.5 wk * ($100 / scheduledWeeks)
     expect(Number(rows[1]!.sub_cost_usd)).toBeCloseTo(0.5 * (100 / cycle.scheduledWeeks), 5);
   });
+
+  test("ignores transient single-poll reset_at glitch that snaps back to prior window", () => {
+    const t0 = Date.parse("2026-11-27T09:58:13.309Z");
+    const t1 = Date.parse("2026-11-27T10:09:16.945Z");
+    const t2 = Date.parse("2026-11-27T10:18:18.438Z");
+    const realReset = Date.parse("2026-12-03T07:58:07.000Z");
+    const glitchReset = Date.parse("2026-12-04T10:10:17.000Z");
+
+    const samples: QuotaPoint[] = [
+      { tsMs: t0, usedPct: 35.98, resetAtMs: realReset, plan: "ultra" },
+      { tsMs: t1, usedPct: 0, resetAtMs: glitchReset, plan: "ultra" },
+      { tsMs: t2, usedPct: 36.4, resetAtMs: realReset, plan: "ultra" },
+    ];
+
+    const cycles = analyzeBillingCycles(samples, {
+      provider: "antigravity",
+      billingDay: 22,
+      explicitMonthlyCost: 200,
+      explicitPlan: "ultra",
+      ignored: false,
+    });
+    const c = cycles.get("2026-11-22")!;
+    expect(c.resets).toHaveLength(0);
+    expect(c.bonusWeeks).toBe(0);
+    expect(c.costPerWeek).toBeCloseTo(200 / (30 / 7), 4);
+
+    const events: AttrEvent[] = [
+      {
+        eventId: "e-before",
+        tsMs: t0 + 60_000,
+        model: "gemini-4-neon-high",
+        apiCostUsd: 5.0,
+        totalTokens: 100_000,
+        effectiveTokens: 50_000,
+        failed: false,
+        quotaUsedPct: null,
+        quotaResetAtMs: null,
+      },
+      {
+        eventId: "e-after",
+        tsMs: t1 + 60_000,
+        model: "gemini-4-neon-high",
+        apiCostUsd: 5.0,
+        totalTokens: 100_000,
+        effectiveTokens: 50_000,
+        failed: false,
+        quotaUsedPct: null,
+        quotaResetAtMs: null,
+      },
+    ];
+
+    const attr = attributeAccountEvents(events, samples, {
+      weights: { baselineRate: 0, tokenBaselineRate: 0, multipliers: new Map() },
+      costPerWeekAt: () => c.costPerWeek,
+      ignored: false,
+    });
+    const totalQuota = (attr.get("e-before")?.quotaWeeks ?? 0) + (attr.get("e-after")?.quotaWeeks ?? 0);
+    // Real delta from 35.98% -> 36.40% = 0.0042 weekly quota (not dropped as stale!)
+    expect(totalQuota).toBeCloseTo(0.0042, 6);
+  });
+
+  test("resolves hyphenated thinking suffixes to LiteLLM base prices and computes providerEconomics", async () => {
+    await db.sql`truncate events, sessions, models, quota_samples, subscriptions, model_prices, model_price_overrides restart identity cascade`;
+    resetBoardCaches(db.sql);
+
+    await db.sql`
+      insert into model_prices (id, provider, mode, input_cost_per_token, output_cost_per_token, cache_read_input_token_cost, raw)
+      values
+        ('gemini/gemini-4-neon', 'gemini', 'chat', 0.000003, 0.000015, 0.00000015, '{}'::jsonb),
+        ('claude-opus-5-5', 'anthropic', 'chat', 0.000004, 0.000020, 0.00000020, '{}'::jsonb)
+    `;
+
+    const base = Date.now() - 3_600_000;
+    const usage = { input: 1_000_000, cacheRead: 0, cacheWrite: 0, answer: 100_000, reasoning: 0 };
+    const events = [];
+    for (let i = 0; i < 6; i++) {
+      events.push(
+        {
+          ...normalizeRecord(
+            usageRecord({
+              kind: "gemini",
+              at: new Date(base + i * 60_000),
+              apiKey: KEY_ADA,
+              model: "gemini-4-neon-high",
+              alias: "gemini-4-neon(high)",
+              source: "ag@example.com",
+              sessionId: "thread-ag-1",
+              usage,
+            }),
+          )!,
+          provider: "antigravity",
+          event_id: `ag-${i}`,
+        },
+        {
+          ...normalizeRecord(
+            usageRecord({
+              kind: "claude",
+              at: new Date(base + i * 60_000),
+              apiKey: KEY_BOB,
+              model: "claude-opus-5-5",
+              alias: "claude-opus-5-5",
+              source: "cl@example.com",
+              sessionId: "thread-cl-1",
+              usage,
+            }),
+          )!,
+          event_id: `cl-${i}`,
+        },
+      );
+    }
+    await insertEvents(db.sql, events);
+
+    // Check model_pricing resolved gemini-4-neon-high -> gemini/gemini-4-neon
+    const pricingRows = await db.sql<{ model: string; price_source: string; litellm_id: string }[]>`
+      select model, price_source, litellm_id from model_pricing where model = 'gemini-4-neon-high'`;
+    expect(pricingRows).toHaveLength(1);
+    expect(pricingRows[0]!.litellm_id).toBe("gemini/gemini-4-neon");
+    expect(pricingRows[0]!.price_source).toBe("provider-prefix");
+
+    // Assign direct subscription costs (6 * $4.50 = $27 API list for AG; 6 * $6.00 = $36 API list for Claude)
+    await db.sql`update events set sub_cost_usd = 0.09, quota_weeks = 0.002 where provider = 'antigravity'`;
+    await db.sql`update events set sub_cost_usd = 0.075, quota_weeks = 0.002 where provider = 'claude'`;
+
+    const board = await buildBoard(db.sql, "UTC", "7d", 1);
+    assertBoard(board);
+    expect(board.providerEconomics).toHaveLength(2);
+    // Claude: $36 / $0.45 = 80x; Antigravity: $27 / $0.54 = 50x -> sorted by subsidy desc
+    expect(board.providerEconomics[0]!.provider).toBe("claude");
+    expect(board.providerEconomics[0]!.subsidyMultiplier).toBeCloseTo(80, 3);
+    expect(board.providerEconomics[0]!.substantialThreads).toBe(1);
+    expect(board.providerEconomics[0]!.medianThreadSubCostUsd).toBeCloseTo(0.45, 5);
+    expect(board.providerEconomics[1]!.provider).toBe("antigravity");
+    expect(board.providerEconomics[1]!.subsidyMultiplier).toBeCloseTo(50, 3);
+    expect(board.providerEconomics[1]!.apiUsdPerQuotaWeek).toBeCloseTo(2250, 1);
+
+    const agModel = board.models.find((m) => m.model === "gemini-4-neon");
+    expect(agModel?.listCostUsd).toBeCloseTo(27, 4);
+    expect(agModel?.subsidyMultiplier).toBeCloseTo(50, 3);
+  });
 });

@@ -8,6 +8,7 @@ import type {
   LiveEvent,
   ModelRow,
   PersonRow,
+  ProviderEconomics,
   RangeKey,
   Timeline,
   TokenCounts,
@@ -309,6 +310,8 @@ export async function buildBoard(
     bucketRows,
     timelineRows,
     modelRows,
+    providerEconRows,
+    providerThreadRows,
     recentRows,
     nowRows,
     prevRows,
@@ -388,13 +391,56 @@ export async function buildBoard(
               mode() within group (order by provider) as provider,
               ${REQUESTS}::int as requests,
               ${TOKEN_SUMS},
+              coalesce(sum(input_tokens + 0.1 * cache_read_tokens + 1.25 * cache_write_tokens + 5.0 * output_tokens + unclassified_tokens), 0)::float8 as eff_tokens,
               sum(${costCol})::float8 as cost,
               sum(api_cost_usd)::float8 as list_cost,
+              sum(api_cost_usd) filter (where sub_cost_usd is not null and api_cost_usd is not null)::float8 as paired_api_cost,
+              sum(sub_cost_usd) filter (where sub_cost_usd is not null and api_cost_usd is not null)::float8 as paired_sub_cost,
               ${costMode === "subscription" ? "bool_or(sub_cost_usd is not null)" : "bool_or(price_source is not null)"} as priced,
               bool_or(price_source is not null) as list_priced
        from events_v
        where ts >= $1 ${andP(2)}
        group by requested_model`,
+      withP([since]),
+    ),
+    query(
+      sql,
+      `select lower(provider) as provider,
+              ${REQUESTS}::int as requests,
+              count(distinct thread_id)::int as threads,
+              ${TOKEN_SUMS},
+              coalesce(sum(input_tokens + 0.1 * cache_read_tokens + 1.25 * cache_write_tokens + 5.0 * output_tokens + unclassified_tokens), 0)::float8 as eff_tokens,
+              coalesce(sum(quota_weeks), 0)::float8 as quota_weeks,
+              sum(sub_cost_usd)::float8 as sub_cost,
+              sum(api_cost_usd)::float8 as list_cost,
+              bool_or(sub_cost_usd is not null) as has_sub,
+              bool_or(price_source is not null) as has_list,
+              sum(api_cost_usd) filter (where sub_cost_usd is not null and api_cost_usd is not null)::float8 as paired_api_cost,
+              sum(sub_cost_usd) filter (where sub_cost_usd is not null and api_cost_usd is not null)::float8 as paired_sub_cost,
+              sum(quota_weeks) filter (where quota_weeks is not null and api_cost_usd is not null)::float8 as paired_quota_weeks,
+              sum(api_cost_usd) filter (where quota_weeks is not null and api_cost_usd is not null)::float8 as paired_quota_api_cost
+       from events_v
+       where ts >= $1 and provider is not null ${andP(2)}
+       group by lower(provider)`,
+      withP([since]),
+    ),
+    query(
+      sql,
+      `with t as (
+         select thread_id,
+                mode() within group (order by lower(provider)) as provider,
+                count(*) filter (where not failed) as ok_reqs,
+                sum(sub_cost_usd)::float8 as sub_cost
+         from events_v
+         where ts >= $1 and thread_id is not null and provider is not null ${andP(2)}
+         group by thread_id
+       )
+       select provider,
+              count(*) filter (where ok_reqs >= 5)::int as substantial_threads,
+              percentile_cont(0.5) within group (order by sub_cost) filter (where ok_reqs >= 5 and sub_cost is not null)::float8 as median_sub_cost,
+              avg(sub_cost) filter (where ok_reqs >= 5 and sub_cost is not null)::float8 as avg_sub_cost
+       from t
+       group by provider`,
       withP([since]),
     ),
     query(
@@ -628,19 +674,88 @@ export async function buildBoard(
       const model = String(r.model);
       const priced = r.priced === true;
       const listPriced = r.list_priced === true;
+      const pairedApi = numOrNull(r.paired_api_cost);
+      const pairedSub = numOrNull(r.paired_sub_cost);
+      const subsidyMultiplier =
+        pairedApi !== null && pairedSub !== null && pairedApi > 0 && pairedSub > 0
+          ? pairedApi / pairedSub
+          : null;
       return {
         model,
         displayName: displayModelName(model),
         provider: String(r.provider ?? "unknown"),
         requests: num(r.requests),
         tokens: tokenCounts(r),
+        effectiveTokens: num(r.eff_tokens),
         costUsd: priced ? numOrNull(r.cost) : null,
         listCostUsd: listPriced ? numOrNull(r.list_cost) : null,
+        subsidyMultiplier,
         priced,
         topPersonId: topPerson.get(model)?.id ?? null,
       };
     })
     .sort((a, b) => b.tokens.total - a.tokens.total || a.model.localeCompare(b.model));
+
+  // ---- provider economics
+  const threadStatsByProvider = new Map<string, Row>(
+    providerThreadRows.map((r) => [String(r.provider).toLowerCase(), r]),
+  );
+  const providerEconomics: ProviderEconomics[] = providerEconRows
+    .map((r) => {
+      const provider = String(r.provider).toLowerCase();
+      const tokens = tokenCounts(r);
+      const effectiveTokens = num(r.eff_tokens);
+      const subCostUsd = r.has_sub === true ? numOrNull(r.sub_cost) : null;
+      const listCostUsd = r.has_list === true ? numOrNull(r.list_cost) : null;
+      const pairedApi = numOrNull(r.paired_api_cost);
+      const pairedSub = numOrNull(r.paired_sub_cost);
+      const subsidyMultiplier =
+        pairedApi !== null && pairedSub !== null && pairedApi > 0 && pairedSub > 0
+          ? pairedApi / pairedSub
+          : null;
+      const pairedQuotaApi = numOrNull(r.paired_quota_api_cost);
+      const pairedQuotaWeeks = numOrNull(r.paired_quota_weeks);
+      const apiUsdPerQuotaWeek =
+        pairedQuotaApi !== null && pairedQuotaWeeks !== null && pairedQuotaApi > 0 && pairedQuotaWeeks > 0
+          ? pairedQuotaApi / pairedQuotaWeeks
+          : null;
+      const subUsdPerMillionEffTokens =
+        subCostUsd !== null && subCostUsd > 0 && effectiveTokens > 0
+          ? (subCostUsd / effectiveTokens) * 1e6
+          : null;
+      const outputTokensPerSubDollar =
+        subCostUsd !== null && subCostUsd > 0 && tokens.output > 0
+          ? tokens.output / subCostUsd
+          : null;
+      const tRow = threadStatsByProvider.get(provider);
+      const inputSide = tokens.input + tokens.cacheRead + tokens.cacheWrite;
+      return {
+        provider,
+        requests: num(r.requests),
+        threads: num(r.threads),
+        substantialThreads: num(tRow?.substantial_threads),
+        tokens,
+        effectiveTokens,
+        subCostUsd,
+        listCostUsd,
+        quotaWeeks: num(r.quota_weeks),
+        subsidyMultiplier,
+        apiUsdPerQuotaWeek,
+        subUsdPerMillionEffTokens,
+        outputTokensPerSubDollar,
+        medianThreadSubCostUsd: numOrNull(tRow?.median_sub_cost),
+        avgThreadSubCostUsd: numOrNull(tRow?.avg_sub_cost),
+        cacheHitRate: ratio(tokens.cacheRead, inputSide),
+      };
+    })
+    .sort((a, b) => {
+      if (a.subsidyMultiplier !== null && b.subsidyMultiplier !== null && a.subsidyMultiplier !== b.subsidyMultiplier) {
+        return b.subsidyMultiplier - a.subsidyMultiplier;
+      }
+      if (a.subsidyMultiplier !== null) return -1;
+      if (b.subsidyMultiplier !== null) return 1;
+      return b.tokens.total - a.tokens.total || a.provider.localeCompare(b.provider);
+    });
 
   // ---- totals
   const totalRow = totalRows[0];
@@ -732,6 +847,7 @@ export async function buildBoard(
     totals,
     people,
     models,
+    providerEconomics,
     timeline,
     heatmap: slow.heatmap,
     awards: buildAwards(stats, threadRows, costMode),

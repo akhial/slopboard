@@ -476,6 +476,11 @@ a {
   color: var(--ink);
 }
 
+.tag-subsidy {
+  background: var(--lime);
+  color: var(--ink);
+}
+
 .tag-ghost {
   background: transparent;
   box-shadow: inset 0 0 0 1.5px currentColor;
@@ -750,16 +755,18 @@ a {
   background: var(--prov-dot, var(--lime));
 }
 
-.provider-pill[data-provider="claude"] {
+[data-provider="claude"],
+[data-provider="anthropic"] {
   --prov-dot: #e87b54;
 }
-.provider-pill[data-provider="codex"] {
+[data-provider="codex"],
+[data-provider="openai"] {
   --prov-dot: #10b981;
 }
-.provider-pill[data-provider="antigravity"] {
+[data-provider="antigravity"] {
   --prov-dot: #c575f8;
 }
-.provider-pill[data-provider="gemini"] {
+[data-provider="gemini"] {
   --prov-dot: #4ea1ff;
 }
 
@@ -2994,6 +3001,236 @@ a {
 
 .more:hover {
   background: var(--lime);
+}
+
+/* ---------- bang for buck: provider & model economics ---------- */
+
+.economics {
+  container-type: inline-size;
+}
+
+.econ-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(17.5rem, 1fr));
+  gap: 1.2rem;
+}
+
+.econ-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  min-width: 0;
+  padding: 1.35rem 1.4rem 1.3rem;
+}
+
+.econ-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.45rem;
+}
+
+.econ-provider {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.econ-provider .provider-dot {
+  width: 0.7rem;
+  height: 0.7rem;
+  box-shadow: 0 0 0 2px var(--ink);
+}
+
+.econ-card h3 {
+  font-size: 1.25rem;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.econ-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.econ-badge {
+  display: inline-block;
+  padding: 0.1rem 0.55rem;
+  border-radius: 99rem;
+  background: var(--ink);
+  color: var(--lime);
+  font-size: 0.65rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.econ-hero {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.econ-mult {
+  font-family: var(--display);
+  font-size: clamp(2.4rem, 4.5vw, 3.2rem);
+  font-weight: 900;
+  font-stretch: 72%;
+  line-height: 0.95;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.econ-mult.is-muted {
+  font-size: 1.5rem;
+  opacity: 0.55;
+}
+
+.econ-mult-label {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.econ-meter {
+  height: 0.48rem;
+  overflow: hidden;
+  border-radius: 99rem;
+  background: rgb(24 24 24 / 0.14);
+}
+
+.econ-meter i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--ink);
+}
+
+.econ-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7rem 0.85rem;
+  margin-top: 0.15rem;
+  padding-top: 0.85rem;
+  border-top: 1.5px dashed rgb(24 24 24 / 0.18);
+}
+
+.econ-stats dt {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.econ-stats dd {
+  margin-top: 0.12rem;
+}
+
+.econ-stats dd b {
+  display: block;
+  font-family: var(--display);
+  font-size: 1.1rem;
+  font-weight: 800;
+  font-stretch: 78%;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+
+.econ-stats dd small {
+  display: block;
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.3;
+}
+
+.econ-table-wrap {
+  margin-top: 1.5rem;
+  padding-top: 1.2rem;
+  border-top: 1.5px dashed var(--line-2);
+  overflow-x: auto;
+}
+
+.econ-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.econ-table th {
+  padding: 0 0.6rem 0.55rem;
+  border-bottom: 2px solid var(--fg);
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-align: left;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.econ-table td {
+  padding: 0.6rem;
+  border-bottom: 1px dashed var(--line-2);
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.econ-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.econ-m-name {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.econ-m-name strong {
+  display: block;
+  font-size: 0.94rem;
+  line-height: 1.15;
+}
+
+.econ-m-name small {
+  display: block;
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.econ-table .econ-m-num {
+  text-align: right;
+}
+
+.econ-m-mult b {
+  display: inline-block;
+  padding: 0.08rem 0.5rem;
+  border-radius: 99rem;
+  background: var(--lime);
+  color: var(--ink);
+  font-family: var(--display);
+  font-size: 0.95rem;
+  font-weight: 850;
+  font-stretch: 80%;
+}
+
+.econ-table td small {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.econ-table .is-muted {
+  color: var(--muted);
 }
 
 /* ---------- the pretend bill, as a bank promo ---------- */

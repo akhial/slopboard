@@ -77,12 +77,51 @@ export interface ModelRow {
   provider: string;
   requests: number;
   tokens: TokenCounts;
+  /** Weighted token proxy: input + 0.1*cacheRead + 1.25*cacheWrite + 5*output. */
+  effectiveTokens: number;
   costUsd: number | null;
   listCostUsd: number | null;
+  /** API list USD per $1 of real subscription spend (paired events only), or null. */
+  subsidyMultiplier: number | null;
   /** False when no price is known under the active cost mode, so costUsd is null. */
   priced: boolean;
   /** Person id with the most tokens on this model, or null. */
   topPersonId: string | null;
+}
+
+export interface ProviderEconomics {
+  /** Lowercase provider slug, e.g. "claude", "antigravity", "codex". */
+  provider: string;
+  requests: number;
+  threads: number;
+  /** Threads with at least 5 non-failed requests (filters out 1-shot pings). */
+  substantialThreads: number;
+  tokens: TokenCounts;
+  /** Weighted token proxy: input + 0.1*cacheRead + 1.25*cacheWrite + 5*output. */
+  effectiveTokens: number;
+  /** Real subscription spend in USD, or null when no events had subscription cost. */
+  subCostUsd: number | null;
+  /** Public API list value in USD, or null when no events had a public list price. */
+  listCostUsd: number | null;
+  /** Sum of weekly quota burned across this provider's accounts. */
+  quotaWeeks: number;
+  /**
+   * Subsidization multiplier: API list USD per $1 of real subscription spend,
+   * measured strictly over events priced in both modes. Null if unavailable.
+   */
+  subsidyMultiplier: number | null;
+  /** Public API list USD delivered per 100% weekly quota (paired events only). */
+  apiUsdPerQuotaWeek: number | null;
+  /** Real subscription USD per 1M effective tokens (null if no sub spend). */
+  subUsdPerMillionEffTokens: number | null;
+  /** Output tokens delivered per $1 of real subscription spend (null if no sub spend). */
+  outputTokensPerSubDollar: number | null;
+  /** Median real subscription USD per substantial thread (>=5 non-failed reqs). */
+  medianThreadSubCostUsd: number | null;
+  /** Mean real subscription USD per substantial thread (>=5 non-failed reqs). */
+  avgThreadSubCostUsd: number | null;
+  /** cacheRead / (input + cacheRead + cacheWrite), 0..1. */
+  cacheHitRate: number;
 }
 
 export interface Timeline {
@@ -220,6 +259,8 @@ export interface Board {
   people: PersonRow[];
   /** Sorted by total tokens, largest first. */
   models: ModelRow[];
+  /** Per-provider subscription value & bang-for-buck breakdown in this range. */
+  providerEconomics: ProviderEconomics[];
   timeline: Timeline;
   /** Always the last 28 days, regardless of range. Cells with no traffic are omitted. */
   heatmap: HeatCell[];

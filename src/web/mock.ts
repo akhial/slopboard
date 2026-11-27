@@ -15,6 +15,7 @@ import type {
   PersonRow,
   PoolPoint,
   PoolStatus,
+  ProviderEconomics,
   RangeKey,
   RecordCard,
   TokenCounts,
@@ -751,6 +752,7 @@ function emptyBoard(range: RangeKey, now: number, registered: boolean, providers
     totals: { requests: 0, failedRequests: 0, tokens: { ...ZERO }, costUsd: 0, listCostUsd: 0, threads: 0, subagents: 0, people: 0, tokensPerMinuteNow: 0 },
     people,
     models: [],
+    providerEconomics: [],
     timeline: { unit: win.unit, buckets: win.buckets, series },
     heatmap: [],
     awards: emptyAwards(),
@@ -959,18 +961,91 @@ export function mockBoard(
     .map(({ ma, m }) => {
       const def = MODELS[m];
       const top = argMax(ma.byPerson);
+      const eff = ma.inp + 0.1 * ma.cr + 1.25 * ma.cw + 5 * ma.out;
       return {
         model: def?.id ?? "unknown",
         displayName: def?.name ?? "Unknown",
         provider: def?.provider ?? "unknown",
         requests: ma.requests,
         tokens: tokensOf(ma),
+        effectiveTokens: eff,
         costUsd: def?.price ? ma.cost / 50 : null,
         listCostUsd: def?.price ? ma.cost : null,
+        subsidyMultiplier: def?.price && ma.cost > 0 ? 50 : null,
         priced: Boolean(def?.price),
         topPersonId: top === null ? null : (PEOPLE[top]?.id ?? null),
       };
     });
+
+  const provMap = new Map<
+    string,
+    {
+      requests: number;
+      threads: Set<number>;
+      inp: number;
+      cr: number;
+      cw: number;
+      out: number;
+      rs: number;
+      total: number;
+      eff: number;
+      sub: number;
+      list: number;
+      hasSub: boolean;
+      hasList: boolean;
+    }
+  >();
+  for (let i = begin; i < end; i++) {
+    const e = events[i];
+    if (!e) continue;
+    const prov = (MODELS[e.m]?.provider ?? "unknown").toLowerCase();
+    let agg = provMap.get(prov);
+    if (!agg) {
+      agg = { requests: 0, threads: new Set(), inp: 0, cr: 0, cw: 0, out: 0, rs: 0, total: 0, eff: 0, sub: 0, list: 0, hasSub: false, hasList: false };
+      provMap.set(prov, agg);
+    }
+    agg.requests++;
+    agg.threads.add(e.thread);
+    agg.inp += e.inp;
+    agg.cr += e.cr;
+    agg.cw += e.cw;
+    agg.out += e.out;
+    agg.rs += e.rs;
+    agg.total += e.total;
+    agg.eff += e.inp + 0.1 * e.cr + 1.25 * e.cw + 5 * e.out;
+    if (e.cost !== null) {
+      agg.list += e.cost;
+      agg.sub += e.cost / 50;
+      agg.hasSub = true;
+      agg.hasList = true;
+    }
+  }
+  const providerEconomics: ProviderEconomics[] = [...provMap.entries()]
+    .map(([provider, a]) => {
+      const inputSide = a.inp + a.cr + a.cw;
+      const subCostUsd = a.hasSub ? a.sub : null;
+      const listCostUsd = a.hasList ? a.list : null;
+      const quotaWeeks = subCostUsd !== null ? subCostUsd / 45 : 0;
+      return {
+        provider,
+        requests: a.requests,
+        threads: a.threads.size,
+        substantialThreads: a.threads.size,
+        tokens: tokensOf(a),
+        effectiveTokens: a.eff,
+        subCostUsd,
+        listCostUsd,
+        quotaWeeks,
+        subsidyMultiplier: subCostUsd !== null && subCostUsd > 0 && listCostUsd !== null && listCostUsd > 0 ? listCostUsd / subCostUsd : null,
+        apiUsdPerQuotaWeek: quotaWeeks > 0 && listCostUsd !== null ? listCostUsd / quotaWeeks : null,
+        subUsdPerMillionEffTokens: subCostUsd !== null && subCostUsd > 0 && a.eff > 0 ? (subCostUsd / a.eff) * 1e6 : null,
+        outputTokensPerSubDollar: subCostUsd !== null && subCostUsd > 0 && a.out > 0 ? a.out / subCostUsd : null,
+        medianThreadSubCostUsd: subCostUsd !== null && a.threads.size > 0 ? subCostUsd / a.threads.size : null,
+        avgThreadSubCostUsd: subCostUsd !== null && a.threads.size > 0 ? subCostUsd / a.threads.size : null,
+        cacheHitRate: inputSide > 0 ? a.cr / inputSide : 0,
+      };
+    })
+    .sort((a, b) => (b.subsidyMultiplier ?? -1) - (a.subsidyMultiplier ?? -1) || b.tokens.total - a.tokens.total);
 
   const series: Record<string, number[]> = {};
   for (const person of people) series[person.id] = person.spark;
@@ -1169,6 +1244,7 @@ export function mockBoard(
     },
     people,
     models,
+    providerEconomics,
     timeline: { unit: win.unit, buckets: win.buckets, series },
     heatmap: [...heat.values()],
     awards,
